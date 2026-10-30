@@ -216,6 +216,25 @@ function paintSettings(){
 
   $("#sp-about").innerHTML =
     `<div class="about-logo"><span class="logo">Riffle</span><div><b>Version ${esc(SV.version || "")}</b><p class="hint">Search and clean up every file on your PC.</p></div></div>`
+    + `<div class="sgroup">Made by</div>
+       <div class="maker">
+         <div class="mk-card">
+           <div class="mk-top"><span class="bl-word">bliink</span><span class="pill lbl-safe">Studio</span></div>
+           <p>A small studio of useful apps, for books, people, habits and the web. Each one lives on its own
+              bliink.in address and is free to start. Riffle is one of them.</p>
+           <p class="mk-steps"><span>Notice</span><span>Build</span><span>Ship</span><span>Listen</span></p>
+           <div class="links"><a href="https://bliink.in" target="_blank" rel="noopener">bliink.in</a>
+             <span class="hint">Shelfy · Lectern · Relay · Keep · Wall · KickAsh · Flock · Bliink Links</span></div>
+         </div>
+         <div class="mk-card">
+           <div class="mk-top"><span class="mk-name">Ravi Rahul</span><span class="pill lbl-review">Maker</span></div>
+           <p>Builds to learn. Two books, seven Chrome extensions, a shelf of web apps, and a day job growing
+              D2C brands in India. Bliink is built and run by him.</p>
+           <div class="links"><a href="https://ravirahul.bliink.in" target="_blank" rel="noopener">ravirahul.bliink.in</a>
+             <a href="mailto:hello@ravirahul.com">hello@ravirahul.com</a></div>
+           <p class="mk-sign">All good, always good.</p>
+         </div>
+       </div>`
     + row("Your data", `Index, settings and fingerprints live in <code>${esc(SV.dataDir)}</code>. Nothing leaves this PC.`,
           `<button class="btn" id="sOpenData">Open folder</button>`)
     + row("Updates", "", `<button class="btn" id="sCheck">Check now</button>`)

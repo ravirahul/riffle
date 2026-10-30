@@ -102,3 +102,30 @@
 #set .vstat{font-size:12px}
 #set .vfolders li{font-size:11.5px}
 #app.noanim *{animation:none!important}
+
+/* ── contrast fixes (dark mode) ──────────────────────────────
+   Anything sitting on the bright highlighter yellow keeps dark ink,
+   whatever the theme, so it stays readable. */
+html[data-theme="dark"] .mk,
+html[data-theme="dark"] .welcome h2 .mk,
+html[data-theme="dark"] .pane h1 .mk{color:#14151A}
+html[data-theme="dark"] .btn.danger.fill{color:#14151A}
+html[data-theme="dark"] .upd{color:var(--ink)}
+.tile.on-mark{color:#14151A !important}
+.links a{color:var(--live);text-underline-offset:2px}
+.links a:hover{color:var(--ink)}
+
+/* About: made by Bliink and Ravi Rahul */
+.maker{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0 6px}
+.mk-card{background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.mk-card p{font-size:12.5px;color:var(--ink-2);line-height:1.55}
+.mk-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.bl-word{font-weight:700;font-size:20px;letter-spacing:-.03em}
+.mk-name{font-weight:700;font-size:17px;letter-spacing:-.01em}
+.mk-steps{display:flex;gap:6px;flex-wrap:wrap}
+.mk-steps span{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);border:1px solid var(--rule-2);border-radius:20px;padding:1px 8px}
+.mk-steps span+span::before{content:"→ ";color:var(--muted)}
+.mk-sign{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--muted)!important}
+.maker .links{margin-top:auto;align-items:baseline}
+.maker .links .hint{flex-basis:100%;margin-top:2px}
+@media(max-width:720px){.maker{grid-template-columns:1fr}}

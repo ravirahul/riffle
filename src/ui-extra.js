@@ -452,9 +452,11 @@ const smap = {
     box.innerHTML = rects.map(({ n, x, y, w, h }, i) => {
       const t = n.size / max;
       const leaf = !n.kids.length || n.name === "(files)" || / more$/.test(n.name);
-      const bg = i === 0 ? "var(--mark)" : `color-mix(in srgb, var(--mark) ${Math.round(15 + 55 * t)}%, var(--card))`;
+      const pct = i === 0 ? 100 : Math.round(15 + 55 * t);
+      const bg = pct === 100 ? "var(--mark)" : `color-mix(in srgb, var(--mark) ${pct}%, var(--card))`;
+      const onMark = pct >= 45 || !document.documentElement.dataset.theme || document.documentElement.dataset.theme === "light";
       const path = this.root.replace(/\\?$/, "\\") + n.name;
-      return `<div class="tile${leaf ? " leaf" : ""}" ${leaf ? "" : `data-go="${esc(path)}" tabindex="0" role="button"`}
+      return `<div class="tile${leaf ? " leaf" : ""}${onMark ? " on-mark" : ""}" ${leaf ? "" : `data-go="${esc(path)}" tabindex="0" role="button"`}
         style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${bg};color:var(--ink)" title="${esc(n.name)} · ${fmtSize(n.size)}">
         ${w > 60 && h > 30 ? `<b>${esc(n.name)}</b><span>${fmtSize(n.size)}</span>` : ""}</div>`;
     }).join("");
