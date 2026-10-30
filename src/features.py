@@ -185,6 +185,8 @@ def get(h, path):
         return _json(h, check_update())
     if path == '/api/autostart':
         return _json(h, {'on': autostart()})
+    if path == '/api/visual/status' and pack_needed():
+        return _json(h, {'available': False, 'pack': dict(_pack), 'suggested': []})
     if path.startswith('/ui/'):
         name = path[4:]
         if name not in STATIC:
@@ -302,6 +304,9 @@ def post(h, path, body):
         return _json(h, _cleaner.remove(body.get('paths', [])))
     if path == '/api/autostart':
         return _json(h, {'on': autostart(bool(body.get('on')))})
+    if path == '/api/visual/install':
+        pack_install()
+        return _json(h, {'pack': dict(_pack)})
     if path == '/api/update/open':
         u = check_update()
         if u.get('url', '') and u['url'].startswith('https://github.com/'):
@@ -313,6 +318,95 @@ def post(h, path, body):
         root = body.get('root') or 'C:\\'
         return _json(h, cleanup.space_map(records(0), root, depth=int(body.get('depth', 3))))
     return False
+
+# -- optional visual-search pack -----------------------------------------------------
+# The installer ships without OpenCV, OpenVINO, Pillow and the model (~270 MB).
+# They come as one zip attached to the GitHub release, fetched only when wanted.
+PACK_NAME = 'riffle-visual-pack.zip'
+_pack = {'state': 'idle', 'got': 0, 'total': 0, 'error': ''}
+
+def pack_dir():
+    return os.path.join(_ctx['data_dir'], 'addons', 'visual')
+
+def pack_needed():
+    """True when this build has no visual libraries and the pack isn't installed."""
+    import sys
+    if not getattr(sys, 'frozen', False):
+        return False                      # running from source: use the normal site-packages
+    return not os.path.exists(os.path.join(pack_dir(), 'ok'))
+
+def pack_activate():
+    """Put the pack on the import path. Returns its models folder, or None."""
+    import sys
+    d = pack_dir()
+    if not os.path.exists(os.path.join(d, 'ok')):
+        return None
+    site = os.path.join(d, 'site')
+    if site not in sys.path:
+        sys.path.insert(0, site)
+        for sub in ('openvino\\libs', 'openvino', 'cv2', 'PIL'):
+            p = os.path.join(site, sub)
+            if os.path.isdir(p):
+                os.add_dll_directory(p)
+    return os.path.join(d, 'models')
+
+def _release_asset(name):
+    req = urllib.request.Request(UPDATE_URL.format(repo=_ctx['repo']),
+                                 headers={'User-Agent': 'Riffle', 'Accept': 'application/vnd.github+json'})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        rel = json.load(r)
+    for a in rel.get('assets', []):
+        if a['name'] == name:
+            return a['browser_download_url'], a.get('size', 0)
+    raise RuntimeError(f'{name} is not attached to the latest release')
+
+def pack_install():
+    if _pack['state'] == 'downloading':
+        return
+    def run():
+        import hashlib
+        import shutil
+        import zipfile
+        _pack.update(state='downloading', got=0, total=0, error='')
+        base = os.path.join(_ctx['data_dir'], 'addons')
+        os.makedirs(base, exist_ok=True)
+        zpath = os.path.join(base, PACK_NAME + '.part')
+        try:
+            url, size = _release_asset(PACK_NAME)
+            sum_url, _ = _release_asset(PACK_NAME + '.sha256')
+            with urllib.request.urlopen(urllib.request.Request(sum_url, headers={'User-Agent': 'Riffle'}), timeout=15) as r:
+                want = r.read().decode().split()[0].lower()
+            _pack['total'] = size
+            h = hashlib.sha256()
+            with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Riffle'}), timeout=30) as r, \
+                    open(zpath, 'wb') as f:
+                while chunk := r.read(1 << 20):
+                    f.write(chunk)
+                    h.update(chunk)
+                    _pack['got'] += len(chunk)
+            if h.hexdigest() != want:
+                raise RuntimeError('download was corrupted (checksum mismatch), please try again')
+            _pack['state'] = 'unpacking'
+            tmp = pack_dir() + '.new'
+            shutil.rmtree(tmp, ignore_errors=True)
+            with zipfile.ZipFile(zpath) as z:
+                for m in z.namelist():                 # refuse paths escaping the folder
+                    if m.startswith(('/', '\\')) or '..' in m.replace('\\', '/').split('/'):
+                        raise RuntimeError('bad file in pack')
+                z.extractall(tmp)
+            open(os.path.join(tmp, 'ok'), 'w').close()
+            shutil.rmtree(pack_dir(), ignore_errors=True)
+            os.replace(tmp, pack_dir())
+            _pack['state'] = 'done'
+            _ctx.get('reset_visual', lambda: None)()
+        except Exception as e:
+            _pack.update(state='error', error=str(e))
+        finally:
+            try:
+                os.remove(zpath)
+            except OSError:
+                pass
+    threading.Thread(target=run, daemon=True, name='visual-pack').start()
 
 # -- updates -------------------------------------------------------------------------
 def _vtuple(v):

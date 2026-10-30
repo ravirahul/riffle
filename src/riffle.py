@@ -1244,7 +1244,11 @@ def visual():
     with _visual_lock:
         if _visual['mod'] is None and _visual['error'] is None:
             try:
+                models = features.pack_activate()      # optional download in light builds
                 import visual as v
+                if models:
+                    from pathlib import Path
+                    v.MODELS = Path(models)
                 v.start(VISUAL_DIR, model_cache=os.path.join(DATA_DIR, 'model-cache'))
                 _visual['mod'] = v
             except Exception as e:
@@ -1279,6 +1283,8 @@ def _visual_loop():
 # Serves ui.html and a small JSON API on 127.0.0.1:PORT.
 
 def default_roots():
+    if os.environ.get('RIFFLE_ROOTS'):          # testing / demos: index only these folders
+        return os.environ['RIFFLE_ROOTS'].split(';')
     if IS_WIN:
         out = []
         for c in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
@@ -1756,6 +1762,7 @@ def main():
             print(f'[riffle] cache unusable ({e}), starting fresh')
 
     features.init(ENGINE, CAT_DIR, DATA_DIR, VERSION, GITHUB_REPO, RES)
+    features._ctx['reset_visual'] = lambda: _visual.update(error=None)   # retry after the pack installs
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     url = f'http://127.0.0.1:{PORT}'
     print(f'[riffle] {url}')

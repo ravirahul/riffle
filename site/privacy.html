@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riffle privacy policy</title>
+<link rel="icon" href="favicon.ico">
+<style>
+@font-face{font-family:'Instrument Sans';font-weight:400 700;font-display:swap;src:url(fonts/instrument-sans.woff2) format('woff2')}
+:root{--paper:#F5F2EA;--ink:#15161A;--ink-2:#3C3D44;--rule:#E0DACD;--mark:#FFE24D}
+@media (prefers-color-scheme:dark){:root{--paper:#14151A;--ink:#EDEEF2;--ink-2:#B4B7C2;--rule:#282B34;--mark:#FFD426}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font:17px/1.65 "Instrument Sans",-apple-system,"Segoe UI",system-ui,sans-serif;padding:40px 24px 80px}
+main{max-width:720px;margin:0 auto}
+.logo{display:inline-block;font-weight:700;font-size:14px;letter-spacing:.14em;text-transform:uppercase;padding:6px 10px;background:var(--mark);color:#15161A;border-radius:2px;transform:rotate(-1.2deg);text-decoration:none;margin-bottom:36px}
+h1{font-size:36px;letter-spacing:-.02em;margin-bottom:6px}
+.date{color:var(--ink-2);margin-bottom:28px}
+h2{font-size:20px;margin:30px 0 8px}
+p,li{color:var(--ink-2)}
+ul{padding-left:22px;display:flex;flex-direction:column;gap:6px}
+a{color:inherit}
+</style>
+</head>
+<body>
+<main>
+  <a class="logo" href="index.html">Riffle</a>
+  <h1>Privacy policy</h1>
+  <p class="date">Last updated 30 October 2026</p>
+
+  <p>Riffle runs entirely on your computer. It doesn't collect, store or send any personal data, file names, file contents or usage statistics to anyone, including us.</p>
+
+  <h2>What Riffle keeps on your PC</h2>
+  <ul>
+    <li>An index of file and folder names, sizes and dates, so search is instant.</li>
+    <li>File fingerprints (hashes) from duplicate scans, so later scans are faster.</li>
+    <li>If you turn on visual search: small previews and image fingerprints of the folders you choose.</li>
+    <li>Your settings, such as theme and filters.</li>
+  </ul>
+  <p>All of this lives in <code>%LOCALAPPDATA%\Riffle</code> on your PC. Uninstalling removes the index and fingerprints.</p>
+
+  <h2>When Riffle uses the internet</h2>
+  <ul>
+    <li>Once a day it asks GitHub whether a newer version exists. The request contains no information about you or your files.</li>
+    <li>If you choose to add visual search, it downloads that component from GitHub.</li>
+    <li>If you add a shared Google Drive folder to visual search, it reads that folder's previews from Google using the API key you provide.</li>
+  </ul>
+
+  <h2>Your files</h2>
+  <p>Riffle only changes files when you ask it to, for example sending duplicates to the Recycle Bin or clearing caches you confirmed. It never uploads files.</p>
+
+  <h2>Contact</h2>
+  <p>Questions: open an issue at <a href="https://github.com/ravirahul/riffle/issues">github.com/ravirahul/riffle/issues</a>.</p>
+</main>
+</body>
+</html>

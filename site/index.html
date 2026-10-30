@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riffle: find any file, free the space</title>
+<meta name="description" content="Riffle searches every file on your Windows PC as you type, previews them with Space, finds duplicates and shows what's safe to clean up. Free, private, light.">
+<meta property="og:title" content="Riffle: find any file, free the space">
+<meta property="og:description" content="Search every file on your PC as you type. Preview, find duplicates, clean up. Free and private.">
+<meta property="og:image" content="img/search-preview.webp">
+<link rel="icon" href="favicon.ico">
+<style>
+@font-face{font-family:'Instrument Sans';font-weight:400 700;font-display:swap;src:url(fonts/instrument-sans.woff2) format('woff2')}
+@font-face{font-family:'DM Mono';font-weight:400;font-display:swap;src:url(fonts/dm-mono-400.woff2) format('woff2')}
+@font-face{font-family:'DM Mono';font-weight:500;font-display:swap;src:url(fonts/dm-mono-500.woff2) format('woff2')}
+:root{
+  --paper:#F5F2EA;--card:#FFFFFF;--ink:#15161A;--ink-2:#3C3D44;--rule:#E0DACD;--rule-2:#CFC7B6;
+  --muted:#7A7264;--mark:#FFE24D;--mark-soft:rgba(255,226,77,.55);--ok:#16794A;
+  --ui:"Instrument Sans",-apple-system,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --mono:"DM Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#14151A;--card:#1B1D24;--ink:#EDEEF2;--ink-2:#B4B7C2;--rule:#282B34;--rule-2:#3A3E4A;
+  --muted:#8C91A0;--mark:#FFD426;--mark-soft:rgba(255,212,38,.25);--ok:#4ADE80;
+}}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--paper);color:var(--ink);font-family:var(--ui);font-size:17px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+.mk{background:linear-gradient(var(--mark),var(--mark)) 0 82%/100% 42% no-repeat;padding:0 3px}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .mk{background-image:linear-gradient(var(--mark-soft),var(--mark-soft))}}
+
+/* header */
+header{display:flex;align-items:center;gap:24px;padding:22px 0}
+.logo{font-weight:700;font-size:14px;letter-spacing:.14em;text-transform:uppercase;padding:6px 10px;background:var(--mark);color:#15161A;border-radius:2px;transform:rotate(-1.2deg);text-decoration:none}
+header nav{display:flex;gap:22px;margin-left:auto;font-size:15px}
+header nav a{text-decoration:none;color:var(--ink-2)}
+header nav a:hover{color:var(--ink)}
+
+/* hero */
+.hero{padding:56px 0 40px;text-align:center}
+.hero h1{font-size:clamp(38px,6vw,68px);line-height:1.05;letter-spacing:-.03em;font-weight:700;max-width:860px;margin:0 auto 20px}
+.hero p.lede{font-size:clamp(17px,2vw,20px);color:var(--ink-2);max-width:640px;margin:0 auto 30px}
+.cta{display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:var(--paper);text-decoration:none;
+  padding:15px 26px;border-radius:4px;font-weight:600;font-size:17px;transition:transform .15s,box-shadow .15s}
+.cta:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.18)}
+.cta:focus-visible{outline:3px solid var(--mark);outline-offset:3px}
+.cta svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2.2}
+.sub{display:block;margin-top:12px;font-family:var(--mono);font-size:13px;color:var(--muted)}
+.keys{display:inline-flex;gap:6px;align-items:center;margin:34px 0 18px;font-size:14px;color:var(--ink-2)}
+kbd{font-family:var(--mono);font-size:13px;border:1px solid var(--rule-2);border-bottom-width:3px;border-radius:5px;padding:3px 8px;background:var(--card);color:var(--ink)}
+.shot{border-radius:10px;overflow:hidden;border:1px solid var(--rule);box-shadow:0 30px 80px -20px rgba(0,0,0,.28);background:var(--card)}
+.shot img{display:block;width:100%;height:auto}
+.hero .shot{max-width:1060px;margin:0 auto}
+.shot img.dark-only{display:none}
+@media (prefers-color-scheme:dark){.shot img.light-only{display:none}.shot img.dark-only{display:block}}
+
+/* features */
+section{padding:72px 0}
+.sec-h{font-size:12px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);display:flex;gap:10px;align-items:center;margin-bottom:28px}
+.sec-h::after{content:"";flex:1;height:1px;background:var(--rule)}
+.feat{display:grid;grid-template-columns:1fr 1.25fr;gap:48px;align-items:center;margin-bottom:84px}
+.feat:nth-of-type(even){grid-template-columns:1.25fr 1fr}
+.feat:nth-of-type(even) .txt{order:2}
+.feat h2{font-size:clamp(26px,3vw,36px);letter-spacing:-.02em;line-height:1.15;margin-bottom:14px}
+.feat p{color:var(--ink-2);margin-bottom:12px}
+.feat ul{list-style:none;display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.feat li{display:flex;gap:10px;color:var(--ink-2);font-size:16px}
+.feat li::before{content:"";flex-shrink:0;width:7px;height:7px;margin-top:10px;background:var(--mark);border:1px solid var(--ink);transform:rotate(45deg)}
+
+/* light + private */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:24px}
+.card .big{font-size:34px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.card .big small{font-size:15px;font-weight:500;color:var(--muted);margin-left:4px}
+.card h3{font-size:17px;margin:4px 0 6px}
+.card p{font-size:15px;color:var(--ink-2)}
+.card svg{width:22px;height:22px;stroke:var(--ink);fill:none;stroke-width:1.9;margin-bottom:10px}
+
+/* faq */
+details{border-bottom:1px solid var(--rule);padding:18px 0}
+details summary{cursor:pointer;font-weight:600;font-size:18px;list-style:none;display:flex;justify-content:space-between;gap:16px}
+details summary::after{content:"+";font-family:var(--mono);color:var(--muted)}
+details[open] summary::after{content:"−"}
+details summary:focus-visible{outline:2px solid var(--mark);outline-offset:4px}
+details p{color:var(--ink-2);margin-top:10px;max-width:760px}
+.final{text-align:center;padding:90px 0 70px}
+.final h2{font-size:clamp(30px,4vw,46px);letter-spacing:-.02em;margin-bottom:24px}
+footer{border-top:1px solid var(--rule);padding:28px 0 40px;font-size:14px;color:var(--muted);display:flex;gap:20px;flex-wrap:wrap}
+footer a{color:var(--ink-2)}
+
+@media (max-width:860px){
+  .feat,.feat:nth-of-type(even){grid-template-columns:1fr;gap:24px;margin-bottom:60px}
+  .feat:nth-of-type(even) .txt{order:0}
+  .grid3{grid-template-columns:1fr}
+  header nav a.hide-sm{display:none}
+  section{padding:48px 0}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="logo" href="#" aria-label="Riffle home">Riffle</a>
+    <nav aria-label="Main">
+      <a href="#features" class="hide-sm">Features</a>
+      <a href="#private" class="hide-sm">Privacy</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/ravirahul/riffle">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <h1>Find any file. <span class="mk">Free the space.</span></h1>
+      <p class="lede">Riffle searches every file on your Windows PC as you type, shows what's inside with one key, and tells you which duplicates and leftovers are safe to clear.</p>
+      <a class="cta" href="https://github.com/ravirahul/riffle/releases/latest">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg>
+        Download for Windows
+      </a>
+      <span class="sub">Free · Windows 10 and 11 · 20 MB · no admin rights needed</span>
+      <div class="keys" aria-label="Keyboard shortcut Control Shift Space"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd>&nbsp; from anywhere</div>
+      <div class="shot">
+        <img class="light-only" src="img/search-preview.webp" width="1440" height="900" alt="Riffle searching for 'goa' with a photo preview open on the right">
+        <img class="dark-only" src="img/search-preview-dark.webp" width="1440" height="900" alt="" aria-hidden="true">
+      </div>
+    </div>
+
+    <section id="features" aria-labelledby="f-h">
+      <div class="sec-h" id="f-h">What it does</div>
+
+      <div class="feat">
+        <div class="txt">
+          <h2>Every file, <span class="mk">as you type</span></h2>
+          <p>Half a million filenames searched in a few milliseconds. Riffle keeps up as files change, so new downloads show up straight away.</p>
+          <ul>
+            <li>Contains, fuzzy or regex matching</li>
+            <li>Filter by type, folder, date or size, or drag across the charts</li>
+            <li>Open, show in Explorer, copy the path, all from the keyboard</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="img/preview-pdf.webp" width="1440" height="900" alt="A PDF previewed inside Riffle"></div>
+      </div>
+
+      <div class="feat">
+        <div class="txt">
+          <h2>Look inside <span class="mk">with Space</span></h2>
+          <p>Select a file and press Space. Photos, videos, music, PDFs, text and code open right in the side panel. Office files and anything else Windows can preview show their thumbnail.</p>
+        </div>
+        <div class="shot"><img src="img/preview-text.webp" width="1440" height="900" alt="A text file previewed in Riffle's side panel"></div>
+      </div>
+
+      <div class="feat">
+        <div class="txt">
+          <h2>Duplicates, <span class="mk">found by content</span></h2>
+          <p>Riffle compares what's inside files, so renamed copies are caught too. It suggests which copy to keep and says why for every other one.</p>
+          <ul>
+            <li>One copy of every file is always kept</li>
+            <li>Removed copies go to the Recycle Bin</li>
+            <li>Finds whole folders that are copies of each other</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="img/duplicates.webp" width="1440" height="900" alt="Duplicate photos grouped, with the copy to keep marked"></div>
+      </div>
+
+      <div class="feat">
+        <div class="txt">
+          <h2>Clean up, <span class="mk">with reasons</span></h2>
+          <p>Temp files, browser caches, old installers, forgotten downloads, big old files and project folders you can rebuild. Each card says why it's safe, and nothing is removed until you choose.</p>
+          <ul>
+            <li>Your own files go to the Recycle Bin</li>
+            <li>Windows and program folders are never touched</li>
+            <li>A space map shows which folders take the most room</li>
+          </ul>
+        </div>
+        <div class="shot"><img src="img/cleanup.webp" width="1440" height="900" alt="Clean up cards showing space that can be freed"></div>
+      </div>
+    </section>
+
+    <section id="private" aria-labelledby="p-h">
+      <div class="sec-h" id="p-h">Light and private</div>
+      <div class="grid3">
+        <div class="card">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+          <h3>Stays on your PC</h3>
+          <p>No account, no cloud, no tracking. Riffle never uploads your files or their names, and it works offline.</p>
+        </div>
+        <div class="card">
+          <div class="big">20<small>MB</small></div>
+          <h3>Small download</h3>
+          <p>Visual search (find the original of a photo) is an optional extra you can add later.</p>
+        </div>
+        <div class="card">
+          <div class="big">~0<small>% CPU</small></div>
+          <h3>Quiet in the background</h3>
+          <p>One process that waits for Windows to report file changes. Scans only run when you ask.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" aria-labelledby="q-h">
+      <div class="sec-h" id="q-h">Questions</div>
+      <details>
+        <summary>Windows says "Windows protected your PC". Is it safe?</summary>
+        <p>That message appears for new apps that haven't built a download reputation yet. Click <b>More info</b>, then <b>Run anyway</b>. Riffle's code is public on GitHub, so anyone can check what it does.</p>
+      </details>
+      <details>
+        <summary>Is it free?</summary>
+        <p>Yes, completely.</p>
+      </details>
+      <details>
+        <summary>Can cleaning up break anything?</summary>
+        <p>Riffle never touches Windows, Program Files or app data folders. Your own files go to the Recycle Bin, so you can restore them. Only caches and temp files, which apps rebuild by themselves, are deleted outright, and each card says so before you confirm.</p>
+      </details>
+      <details>
+        <summary>How do I uninstall it?</summary>
+        <p>Settings, then Apps, then Riffle, then Uninstall. It removes the app, its startup entry and its index.</p>
+      </details>
+    </section>
+
+    <div class="final">
+      <h2>Stop hunting for files.</h2>
+      <a class="cta" href="https://github.com/ravirahul/riffle/releases/latest">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg>
+        Download Riffle
+      </a>
+    </div>
+  </main>
+
+  <footer>
+    <span>Riffle by Bliink</span>
+    <a href="privacy.html">Privacy</a>
+    <a href="https://github.com/ravirahul/riffle">Source</a>
+    <a href="https://github.com/ravirahul/riffle/issues">Report a problem</a>
+  </footer>
+</div>
+</body>
+</html>

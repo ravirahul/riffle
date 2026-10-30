@@ -238,7 +238,7 @@ def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=())
     cards.append({'key': 'bin', 'title': 'Recycle Bin', 'why': 'Everything you deleted earlier '
                   'still takes space until the bin is emptied.', 'action': 'empty_bin',
                   'level': 'safe', 'note': '', 'count': bin_items, 'size': bin_size, 'items': []})
-    return {'time': now, 'cards': [c for c in cards if c['count'] or c['note']]}
+    return {'time': now, 'cards': [c for c in cards if c['count'] or (c['key'] == 'dupes' and not dupe_groups)]}
 
 # --- space map ------------------------------------------------------------------
 def space_map(records, root, depth=3, top=14):

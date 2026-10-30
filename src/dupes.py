@@ -8,6 +8,7 @@ are skipped because reading them would download them.
 import ctypes
 import hashlib
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -79,14 +80,21 @@ def _full_hash(path, cancel):
 JUNKY_DIRS = ('\\downloads\\', '\\temp\\', '\\tmp\\', '\\$recycle.bin\\', '\\whatsapp',
               '\\telegram desktop\\', '\\cache', '\\backup', '\\old\\', '\\copy of')
 JUNKY_NAMES = (' - copy', ' copy', '(1)', '(2)', '(3)', '_copy', '-copy', ' (copy')
+LOOSE_DIRS = ('\\desktop\\',)                         # files land here in passing
+CAMERA_NAME = re.compile(r'^(img|dsc|dscn|pxl|vid|mov|photo|image|whatsapp image|screenshot)[ _-]?\d', re.I)
+
+def _junk_dir(p):
+    return next((d.strip('\\').title() for d in JUNKY_DIRS if d in p), '')
 
 def keep_score(path, mtime):
-    """Lower is better: prefer organised folders, original names, older files."""
+    """Lower is better: prefer organised folders, given names, older files."""
     p = path.lower()
     name = os.path.basename(p)
     score = 0.0
     score += 10 * sum(d in p for d in JUNKY_DIRS)
     score += 8 * sum(n in name for n in JUNKY_NAMES)
+    score += 4 * sum(d in p for d in LOOSE_DIRS)
+    score += 3 if CAMERA_NAME.match(name) else 0     # "Goa beach.jpg" beats "IMG_2041.jpg"
     score += len(p) / 200          # shorter paths win ties
     score += mtime / 1e10          # older wins remaining ties
     return score
@@ -94,12 +102,16 @@ def keep_score(path, mtime):
 def keep_reason(path, mtime, keep_path, keep_mtime):
     """Short reason this copy is the one to remove, relative to the kept copy."""
     p, k = path.lower(), keep_path.lower()
-    junk = lambda x: any(d in x for d in JUNKY_DIRS)
+    jp, jk = _junk_dir(p), _junk_dir(k)
     copyname = lambda x: any(n in os.path.basename(x) for n in JUNKY_NAMES)
-    if junk(p) and not junk(k):
-        return 'in Downloads / Temp'
+    if jp and not jk:
+        return f'in {jp}'
     if copyname(p) and not copyname(k):
         return 'name looks like a copy'
+    if any(d in p for d in LOOSE_DIRS) and not any(d in k for d in LOOSE_DIRS):
+        return 'loose on the Desktop'
+    if CAMERA_NAME.match(os.path.basename(p)) and not CAMERA_NAME.match(os.path.basename(k)):
+        return 'camera filename'
     if mtime > keep_mtime + 1:
         return 'newer copy'
     return 'longer path'

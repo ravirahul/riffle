@@ -552,6 +552,26 @@ async function checkUpdate(){
   $(".foot").insertBefore(b, $("#reindex"));
 }
 
+/* ── optional visual-search pack ───────────────────────────── */
+paintVisual = (orig => function(s){
+  if (!s.pack) return orig(s);
+  const st = $("#visStat"), p = s.pack;
+  $("#visPick").hidden = $("#visPath").hidden = $("#visSuggest").hidden = true;
+  $("#visFolders").innerHTML = "";
+  if (p.state === "downloading" || p.state === "unpacking"){
+    const pct = p.total ? Math.round(100 * p.got / p.total) : 0;
+    st.innerHTML = (p.state === "unpacking" ? "Unpacking…" : `Downloading ${fmtSize(p.got)} of ${fmtSize(p.total)}`)
+      + `<div class="bar"><i style="width:${pct}%"></i></div>`;
+    clearTimeout(vis.timer); vis.timer = setTimeout(pollVisual, 700);
+    return;
+  }
+  st.innerHTML = `Find the original of any image or video, even after crops and filters. It's an optional
+    download (about 90 MB) that runs fully on this PC.
+    ${p.state === "error" ? `<br><span style="color:var(--warn)">${esc(p.error)}</span>` : ""}
+    <button class="btn ink" id="visGet" style="margin-top:8px">${p.state === "error" ? "Try again" : "Get visual search"}</button>`;
+  $("#visGet").onclick = async () => { await api("/api/visual/install", {}); pollVisual(); };
+})(paintVisual);
+
 /* ── boot ─────────────────────────────────────────────────── */
 $("#ver").textContent = VERSION ? "v" + VERSION : "";
 try{ if (localStorage.getItem("riffle.preview")) togglePreview(true); }catch(e){}

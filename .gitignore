@@ -1,9 +1,9 @@
+*.bin
+*.db
 __pycache__/
 build/
 dist/
-*.db
-*.bin
+models/
+tools/*.code
 tools/*.dis
 tools/*.marshal
-tools/*.code
-models/

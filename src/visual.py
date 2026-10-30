@@ -21,10 +21,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+CV2_ERROR = ""
 try:
     import cv2  # optional: geometric verification (crop/transform proof) and video decoding
-except ImportError:
+except ImportError as e:
     cv2 = None
+    CV2_ERROR = str(e)
 try:
     import pillow_heif; pillow_heif.register_heif_opener()  # optional: HEIC/HEIF
 except ImportError:
@@ -759,7 +761,7 @@ def status():
     return {"available": True, "images": images, "videos": videos, "folders": folders,
             "index": {k: v for k, v in state.items() if k != "source_errors"},
             "engine": _backend["name"] if _backend["run"] else "asleep (loads on next search)",
-            "verify": cv2 is not None, "google_key": bool(config().get("google_api_key")),
+            "verify": cv2 is not None, "cv2_error": CV2_ERROR, "google_key": bool(config().get("google_api_key")),
             "suggested": [f for f in suggested_folders() if f not in {x["path"] for x in folders}]}
 
 def suggested_folders():
