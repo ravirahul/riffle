@@ -47,6 +47,7 @@ DEFAULTS = {
     'hideHidden': True,          # dot-folders and dot-files (.git, .cache, .gitignore)
     'excludeDirs': [],           # folders never shown in results
     'hotkey': 'ctrl+shift+space',
+    'hotkeyOpens': 'bar',        # bar: quick search bar | window: the full Riffle window
     'animation': True,           # the summon riffle
     'theme': 'system',           # system | light | dark
     'previewOnStart': False,
@@ -95,7 +96,7 @@ def _clean_setting(k, v):
         if v not in HOTKEYS:
             raise ValueError('unknown hotkey')
         return v
-    allowed = {'theme': ('system', 'light', 'dark')}[k]
+    allowed = {'theme': ('system', 'light', 'dark'), 'hotkeyOpens': ('bar', 'window')}[k]
     if v not in allowed:
         raise ValueError(f'bad value for {k}')
     return v
@@ -288,6 +289,9 @@ def get(h, path):
         return _json(h, {'on': autostart()})
     if path == '/api/settings':
         return _json(h, settings_view())
+    if path == '/api/inbox':                       # a query handed over by the quick bar, once
+        q, _ctx['inbox'] = _ctx.get('inbox'), None
+        return _json(h, {'q': q})
     if path == '/api/visual/status' and pack_needed():
         return _json(h, {'available': False, 'pack': dict(_pack), 'suggested': []})
     if path.startswith('/ui/'):
@@ -308,6 +312,7 @@ def get(h, path):
 
 STATIC = {'ui-extra.css': 'text/css; charset=utf-8', 'ui-extra.js': 'text/javascript; charset=utf-8',
           'ui-settings.css': 'text/css; charset=utf-8', 'ui-settings.js': 'text/javascript; charset=utf-8',
+          'ui-insights.css': 'text/css; charset=utf-8', 'ui-insights.js': 'text/javascript; charset=utf-8',
           'fonts/fonts.css': 'text/css; charset=utf-8',
           'fonts/instrument-sans.woff2': 'font/woff2', 'fonts/dm-mono-300.woff2': 'font/woff2',
           'fonts/dm-mono-400.woff2': 'font/woff2', 'fonts/dm-mono-500.woff2': 'font/woff2'}
@@ -434,11 +439,177 @@ def post(h, path, body):
             import webbrowser
             webbrowser.open(u['url'])
         return _json(h, {'ok': True})
+    if path == '/api/insights':
+        return _json(h, insights(bool(body.get('all')), body.get('root') or None))
     if path == '/api/spacemap':
         import cleanup
         root = body.get('root') or 'C:\\'
         return _json(h, cleanup.space_map(records(0), root, depth=int(body.get('depth', 3))))
     return False
+
+# -- insights (analytics) ------------------------------------------------------------
+# Every number comes from the index in one numpy pass: no file is opened.
+FILE_CATS = ['document', 'image', 'video', 'audio', 'code', 'archive', 'other']
+_insights = {}
+
+def _locations(dirs_lower, home):
+    """Name the place each directory belongs to: Desktop, Downloads, D:\\ ..."""
+    named = [(os.path.join(home, d).lower(), d) for d in
+             ('Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music')]
+    onedrive = os.path.join(home, 'onedrive').lower()
+    home_l = home.lower()
+    out = []
+    for d in dirs_lower:
+        label = None
+        for p, n in named:
+            if d == p or d.startswith(p + '\\'):
+                label = n
+                break
+        if label is None:
+            if d.startswith(onedrive):
+                label = 'OneDrive'
+            elif d == home_l or d.startswith(home_l + '\\'):
+                label = 'Rest of your user folder'
+            elif d[1:3] == ':\\' and d[:1] != 'c':
+                label = d[:3].upper()
+            else:
+                label = 'Elsewhere on C:\\'
+        out.append(label)
+    return out
+
+def insights(show_all=False, root=None):
+    eng = _ctx['engine']
+    cats = _ctx['cats']
+    ix = eng.ix
+    key = (ix.gen, id(ix), bool(show_all), root)
+    if _insights.get('key') == key:
+        return _insights['data']
+    t0 = time.perf_counter()
+    filt = {} if show_all else {'hideSystem': True, 'hideHidden': True}
+    with eng.lock:
+        ix = eng.ix
+        everything = eng._raw_hits('', 'substring')
+        ids = eng._apply(everything, {**filt, 'kind': 'files'})
+        nfolders = int(eng._apply(everything, {**filt, 'kind': 'folders'}).size)
+        size = ix.size[ids].astype(np.int64)
+        mtime = ix.mtime[ids]
+        cat = ix.cat[ids]
+        extv = ix.extv[ids]
+        par = ix.parent[ids]
+        dirs = ix.dirs
+        exts = list(ix.exts)
+        ndirs = len(dirs)
+    now = time.time()
+    cat_names = [cats[i] for i in range(len(cats))]
+    file_slot = {c: i for i, c in enumerate(FILE_CATS)}
+    cat_slot = np.array([file_slot.get(c, 6) for c in cat_names], dtype=np.int64)[cat]   # folder never occurs here
+
+    # totals
+    week = mtime >= now - 7 * 86400
+    big = np.argsort(-size)[:20] if size.size else np.zeros(0, dtype=np.int64)
+    def path_of(k):
+        d = dirs[int(par[k])]
+        return d + ('' if d.endswith('\\') else '\\') + ix.name(int(ids[k]))
+    data = {
+        'all': bool(show_all),
+        'totals': {'files': int(ids.size), 'folders': nfolders, 'bytes': int(size.sum()),
+                   'weekFiles': int(week.sum()), 'weekBytes': int(size[week].sum())},
+        'biggest': [{'path': path_of(k), 'size': int(size[k]), 'mtime': int(mtime[k]),
+                     'cat': FILE_CATS[int(cat_slot[k])]} for k in big.tolist()],
+    }
+    # by type
+    tf = np.bincount(cat_slot, minlength=7)
+    tb = np.bincount(cat_slot, weights=size, minlength=7)
+    data['types'] = [{'cat': c, 'files': int(tf[i]), 'bytes': int(tb[i])} for i, c in enumerate(FILE_CATS)]
+    # by extension (top 48 by space)
+    ef = np.bincount(extv, minlength=len(exts))
+    eb = np.bincount(extv, weights=size, minlength=len(exts))
+    ec = np.zeros(len(exts), dtype=np.int64)
+    if ids.size:
+        ec[extv] = cat_slot                       # any file of that extension tells its type
+    top = [int(i) for i in np.argsort(-eb)[:48] if eb[i] > 0]
+    data['exts'] = [{'ext': exts[i] or '(none)', 'cat': FILE_CATS[int(ec[i])], 'files': int(ef[i]),
+                     'bytes': int(eb[i])} for i in top]
+    # by location (per-directory labels cached until the folder list changes)
+    loc = _insights.get('loc')
+    if not loc or loc[0] is not dirs or len(loc[1]) != ndirs:
+        labels = _locations([d.lower() for d in dirs[:ndirs]], os.path.expanduser('~'))
+        names = sorted(set(labels))
+        idx = {n: i for i, n in enumerate(names)}
+        loc = (dirs, np.array([idx[l] for l in labels], dtype=np.int64), names)
+        _insights['loc'] = loc
+    lid = loc[1][par] if ids.size else np.zeros(0, dtype=np.int64)
+    lf = np.bincount(lid, minlength=len(loc[2]))
+    lb = np.bincount(lid, weights=size, minlength=len(loc[2]))
+    home_dir = os.path.expanduser('~')
+    def loc_path(n):
+        if n in ('Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music', 'OneDrive'):
+            return os.path.join(home_dir, n)
+        if n == 'Rest of your user folder':
+            return home_dir
+        return n if n.endswith(':\\') and n != 'Elsewhere on C:\\' else ''
+    data['locations'] = sorted(({'label': n, 'path': loc_path(n), 'files': int(lf[i]), 'bytes': int(lb[i])}
+                                for i, n in enumerate(loc[2]) if lf[i]), key=lambda x: -x['bytes'])
+    # age of data (by last change)
+    age = (now - mtime) / 86400
+    edges = [(7, 'This week'), (30, 'This month'), (182, 'Last 6 months'), (365, 'This year'),
+             (730, '1 to 2 years'), (1e9, 'Older than 2 years')]
+    lo, buckets = -1e9, []
+    for hi, label in edges:
+        m = (age > lo) & (age <= hi)
+        buckets.append({'label': label, 'files': int(m.sum()), 'bytes': int(size[m].sum())})
+        lo = hi
+    data['age'] = buckets
+    # activity: files changed per day, last 53 weeks
+    today = int(now // 86400)
+    days = today - (mtime // 86400)
+    recent = days[(days >= 0) & (days < 371)]
+    data['activity'] = {'today': today, 'counts': np.bincount(370 - recent, minlength=371).tolist()}
+    # busiest folders (files directly inside)
+    pf = np.bincount(par, minlength=ndirs) if ids.size else np.zeros(0)
+    pb = np.bincount(par, weights=size, minlength=ndirs) if ids.size else np.zeros(0)
+    data['folders'] = [{'path': dirs[int(i)], 'files': int(pf[i]), 'bytes': int(pb[i])}
+                       for i in np.argsort(-pf)[:15].tolist() if pf[i]]
+    # folder map: two levels under root, coloured by each block's main type
+    home = os.path.expanduser('~')
+    root = root or (home if not show_all else (ix.roots[0] if ix.roots else 'C:\\'))
+    data['map'] = _folder_map(dirs, ndirs, par, size, cat_slot, root)
+    data['ms'] = round((time.perf_counter() - t0) * 1000)
+    _insights.update(key=key, data=data)
+    return data
+
+def _folder_map(dirs, ndirs, par, size, cat_slot, root):
+    rl = root.lower().rstrip('\\') + '\\'
+    n = len(rl)
+    # bytes per (directory, type)
+    per = np.bincount(par * 7 + cat_slot, weights=size, minlength=ndirs * 7).reshape(ndirs, 7) if par.size \
+        else np.zeros((ndirs, 7))
+    used = np.flatnonzero(per.sum(axis=1) > 0)
+    tree = {}
+    for i in used.tolist():
+        d = dirs[i]
+        dl = d.lower() + '\\'
+        if not dl.startswith(rl) and d.lower().rstrip('\\') + '\\' != rl:
+            continue
+        parts = d[n:].split('\\') if len(d) > n else []
+        k1 = parts[0] if parts and parts[0] else '(files here)'
+        k2 = parts[1] if len(parts) > 1 else '(files here)'
+        a = tree.setdefault(k1, {'v': np.zeros(7), 'kids': {}})
+        a['v'] += per[i]
+        b = a['kids'].setdefault(k2, np.zeros(7))
+        b += per[i]
+    def node(name, v, path):
+        return {'name': name, 'path': path, 'bytes': int(v.sum()), 'cat': FILE_CATS[int(np.argmax(v))]}
+    kids = []
+    for k1, a in sorted(tree.items(), key=lambda kv: -kv[1]['v'].sum())[:16]:
+        p1 = root.rstrip('\\') + '\\' + k1 if k1 != '(files here)' else root
+        sub = sorted(a['kids'].items(), key=lambda kv: -kv[1].sum())
+        ch = [node(k2, v, p1.rstrip('\\') + '\\' + k2 if k2 != '(files here)' else p1) for k2, v in sub[:10]]
+        rest = sum((v for _, v in sub[10:]), np.zeros(7))
+        if rest.sum():
+            ch.append({**node(f'{len(sub) - 10} more', rest, p1), 'more': True})
+        kids.append({**node(k1, a['v'], p1), 'kids': ch})
+    return {'root': root, 'bytes': int(sum(k['bytes'] for k in kids)), 'kids': kids}
 
 # -- optional visual-search pack -----------------------------------------------------
 # The installer ships without OpenCV, OpenVINO, Pillow and the model (~270 MB).

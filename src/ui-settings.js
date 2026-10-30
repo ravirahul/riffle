@@ -73,7 +73,8 @@ fetchPage = async function(p, token){
   const r = await fetch("/api/search", {
     method:"POST", headers:{ "Content-Type":"application/json" },
     body:JSON.stringify({ q:state.q, mode:state.mode, filters:f,
-      sort:home ? "modified" : state.sort, desc:home ? true : state.desc, offset:p * PAGE, limit:PAGE })
+      sort:home ? "modified" : (state.q.trim() && !state.sortPicked ? "best" : state.sort),
+      desc:home ? true : (state.q.trim() && !state.sortPicked ? false : state.desc), offset:p * PAGE, limit:PAGE })
   });
   const d = await r.json();
   if (token !== state.token) return null;
@@ -171,6 +172,9 @@ function paintSettings(){
     row("Summon hotkey", SV.hotkey.ok ? `Press it anywhere to open Riffle.`
           : `<span class="warn">${esc(keyLabel(s.hotkey))} is already used by another app. Pick another.</span>`,
         `<select id="sHotkey">${SV.hotkeys.map(k => `<option value="${k}" ${k === s.hotkey ? "selected" : ""}>${esc(keyLabel(k))}</option>`).join("")}</select>`)
+    + row("The hotkey opens", "The quick bar is a small search box that appears instantly over any app.",
+        `<div class="seg2" id="sOpens">${[["bar", "Quick bar"], ["window", "Full window"]].map(([v, l]) =>
+          `<button data-v="${v}" aria-pressed="${(s.hotkeyOpens || "bar") === v}">${l}</button>`).join("")}</div>`)
     + row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
           : "Available in the installed app.", sw("sAuto", SV.autostart, !SV.canAutostart))
     + row("Theme", "", `<div class="seg2" id="sTheme">${["system", "light", "dark"].map(t =>
@@ -269,6 +273,7 @@ $("#set").addEventListener("change", e => {
 $("#set").addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
   if (b.closest("#sTheme")) return saveSetting({ theme:b.dataset.v });
+  if (b.closest("#sOpens")) return saveSetting({ hotkeyOpens:b.dataset.v });
   if (b.closest("#sMode")){
     document.querySelector(`.seg [data-mode="${b.dataset.v}"]`).click();
     return paintSettings();
@@ -303,3 +308,21 @@ $("#set").addEventListener("click", async e => {
 $("#set").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "sExIn") $("#sExAdd").click(); });
 
 loadSettings().then(() => scheduleSearch(0));
+
+/* Best match first while typing; clicking a column header switches to that sort. */
+document.querySelector(".head").addEventListener("click", e => { if (e.target.closest("[data-sort]")) state.sortPicked = true; }, true);
+$("#q").addEventListener("input", () => { if (!$("#q").value) state.sortPicked = false; });
+// Faster response to typing (was 90 ms)
+scheduleSearch = (orig => function(delay = 35){ return orig(delay); })(scheduleSearch);
+
+/* the quick bar can hand a search over to this window ("Open in Riffle") */
+async function checkInbox(){
+  const r = await api("/api/inbox").catch(() => null);
+  if (r && r.q != null){
+    setView("search");
+    $("#q").value = r.q; state.q = r.q; scheduleSearch(0);
+    $("#q").focus();
+  }
+}
+window.addEventListener("focus", checkInbox);
+checkInbox();

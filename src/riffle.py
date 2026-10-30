@@ -424,10 +424,22 @@ class Index:
         else:
             start = len(arr)
         if start < n:
-            test = {'system': _is_system_dir, 'hidden': _is_hidden_dir, 'root': lambda d: len(d) <= 3}[kind]
+            test = {'system': _is_system_dir, 'hidden': _is_hidden_dir, 'root': lambda d: len(d) <= 3,
+                    'startmenu': lambda d: '\\start menu\\' in d}[kind]
             new = np.fromiter((test(d.lower()) for d in self.dirs[start:n]), dtype=bool, count=n - start)
             arr = np.concatenate([arr, new])
             cache[kind] = (arr, self.dirs)
+        return arr
+
+    def dir_lengths(self):
+        """Length of each directory path (shallower folders rank higher). Cached, extended in place."""
+        arr, src = self.__dict__.get('_dirlen', (None, None))
+        n = len(self.dirs)
+        if arr is None or src is not self.dirs or len(arr) > n:
+            arr = np.zeros(0, dtype=np.int32)
+        if len(arr) < n:
+            arr = np.concatenate([arr, np.fromiter((len(d) for d in self.dirs[len(arr):n]), dtype=np.int32)])
+            self._dirlen = (arr, self.dirs)
         return arr
 
     def scope_mask(self, prefix, contains=False):
@@ -506,6 +518,8 @@ SYSTEM_ROOT_FILES = {'pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'dumpstack.
 
 
 def _is_system_dir(d):
+    if '\\start menu\\' in d:
+        return False                 # app shortcuts: the quick bar's best results
     rest = d[2:] if len(d) > 1 and d[1] == ':' else d
     for t in SYSTEM_TOP:
         if rest == t or rest.startswith(t + '\\'):
@@ -1022,9 +1036,27 @@ class Engine:
         if pos.size > MAX_HITS:
             pos = pos[:MAX_HITS]
         ids = np.searchsorted(self.ix.off, pos, side='right') - 1
-        ids = np.unique(ids)
+        # positions are ascending, so ids are too: dedupe in one pass instead of a sort
+        if ids.size > 1:
+            ids = ids[np.concatenate(([True], ids[1:] != ids[:-1]))]
         ids = ids[(ids >= 0) & (ids < self.ix.n)]
         return ids[~self.ix.dead[ids]] if self.ix.ndead else ids
+
+    WORD_SEP = np.frombuffer(b'\x00 _-.([{+,&', dtype=np.uint8)
+
+    def _word_start_ids(self, needle: bytes):
+        """Ids whose name has `needle` at the start of a word. Fast for 1-2 letters."""
+        ix = self.ix
+        pos = self._scan(needle)
+        if pos.size == 0:
+            return np.zeros(0, dtype=np.int64)
+        prev = ix.arr[np.maximum(pos - 1, 0)]
+        pos = pos[(pos == 0) | np.isin(prev, self.WORD_SEP)]
+        ids = np.searchsorted(ix.off, pos, side='right') - 1
+        if ids.size > 1:
+            ids = ids[np.concatenate(([True], ids[1:] != ids[:-1]))]
+        ids = ids[(ids >= 0) & (ids < ix.n)]
+        return ids[~ix.dead[ids]] if ix.ndead else ids
 
     def _raw_hits(self, q, mode):
         """Sorted unique record ids whose name matches q."""
@@ -1155,6 +1187,95 @@ class Engine:
 
         return idx[m]
 
+    # -- relevance: what a person most likely means ------------------------------
+    APP_EXT = ('lnk', 'exe', 'appref-ms', 'url')
+
+    def _relevance(self, ids, q):
+        """Score ids for query q (higher is better). Vectorised over all hits."""
+        ix = self.ix
+        score = np.zeros(ids.size, dtype=np.float64)
+        if not ids.size:
+            return score
+        starts = ix.off[ids]
+        L = ix.off[ids + 1] - starts - 1
+        last = ix.arr.size - 1
+        term = (q.strip().lower().split() or [''])[0].encode('utf-8', 'surrogatepass')
+        if term:
+            n = len(term)
+            pref = L >= n
+            for k, ch in enumerate(term):
+                pref &= ix.arr[np.minimum(starts + k, last)] == ch
+            after = ix.arr[np.minimum(starts + n, last)]
+            exact = pref & ((L == n) | (after == 46))          # "report" == "report.pdf"
+            score += 3.0 * pref + 4.0 * exact
+        age_days = np.maximum(time.time() - ix.mtime[ids], 0) / 86400.0
+        score += 2.0 * np.exp(-age_days / 120.0)
+        score -= 0.03 * np.minimum(L, 120)
+        par = ix.parent[ids]
+        score -= 0.004 * np.minimum(ix.dir_lengths()[par], 200)
+        app_ext = np.array([ix.ext_id[e] for e in self.APP_EXT if e in ix.ext_id], dtype=np.int32)
+        if app_ext.size:
+            score += 6.0 * (ix.flag_mask('startmenu')[par] & np.isin(ix.extv[ids], app_ext))
+        return score
+
+    def _best_order(self, ids, q, top=None):
+        """ids ordered best first; with `top`, only the first `top` are fully sorted."""
+        score = self._relevance(ids, q)
+        if top and ids.size > top:
+            part = np.argpartition(-score, top)[:top]
+            ids, score = ids[part], score[part]
+        # word-start bonus on the short list ("tax 2026" matches "Income tax 2026.pdf" well)
+        term = (q.strip().lower().split() or [''])[0]
+        if term and ids.size <= 2000:
+            ix = self.ix
+            for j, i in enumerate(ids.tolist()):
+                name = ix.name(i).lower()
+                at = name.find(term)
+                if at > 0 and not name[at - 1].isalnum():
+                    score[j] += 2.0
+        return ids[np.argsort(-score, kind='stable')]
+
+    def _row(self, j, q=''):
+        ix = self.ix
+        name = ix.name(j)
+        d = ix.dirs[ix.parent[j]]
+        cat = CATS[int(ix.cat[j])]
+        ext = ix.exts[int(ix.extv[j])]
+        if ext in self.APP_EXT and '\\start menu\\' in d.lower():
+            cat = 'app'
+        term = (q.strip().lower().split() or [''])[0]
+        at = name.lower().find(term) if term else -1
+        return {'name': name, 'dir': d, 'path': d + ('' if d.endswith(('\\', '/')) else os.sep) + name,
+                'ext': ext, 'cat': cat, 'size': int(ix.size[j]), 'mtime': int(ix.mtime[j]),
+                'hl': [at, at + len(term)] if at >= 0 else None}
+
+    def quick(self, q, limit=8, filters=None):
+        """The quick bar's search: best matches only, or recent files for an empty query."""
+        self.last_query = time.time()
+        if self.pending:
+            try:
+                self._drain()
+            except Exception:
+                pass
+        with self.lock:
+            f = dict(filters or {})
+            q = (q or '').strip()
+            if not q:
+                ids = self._apply(self._raw_hits('', 'substring'), {**f, 'kind': 'files'})
+                if ids.size > limit:
+                    ids = ids[np.argpartition(-self.ix.mtime[ids], limit)[:limit]]
+                ids = ids[np.argsort(-self.ix.mtime[ids], kind='stable')]
+            else:
+                term = q.lower().encode('utf-8', 'surrogatepass')
+                if len(term) <= 2 and b' ' not in term:
+                    hits = self._word_start_ids(term)      # Spotlight-style: "ch" -> Chrome
+                else:
+                    hits = self._raw_hits(q, 'substring')
+                if not hits.size:
+                    hits = self._raw_hits(q, 'fuzzy')
+                ids = self._best_order(self._apply(hits, f), q, top=300)[:limit]
+            return [self._row(int(j), q) for j in ids.tolist()]
+
     # The one call the UI makes for every keystroke.
     def query(self, q, mode, filters, sort, desc, offset, limit):
         self.last_query = time.time()
@@ -1209,7 +1330,16 @@ class Engine:
                 hist['size'] = counts.tolist()
 
             # Sorting uses the precomputed ranks, never Python string compares.
-            if sel.size:
+            if sel.size and sort == 'best' and (q or '').strip():
+                # best matches first; only the visible pages need a full sort
+                best = self._best_order(sel, q, top=max(2000, offset + limit))
+                if best.size < sel.size:          # the rest follow, unranked, so totals stay right
+                    sel = np.concatenate([best, sel[~np.isin(sel, best)]])
+                else:
+                    sel = best
+                if desc:
+                    sel = sel[::-1]
+            elif sel.size:
                 if sort == 'size':
                     order = np.argsort(ix.size[sel], kind='stable')
                 elif sort == 'modified':
@@ -1775,6 +1905,58 @@ def focus_window():
 
 
 HOTKEY = {'combo': '', 'ok': False, 'tid': 0}
+QUICK = {'bar': None}
+
+
+def _system_theme():
+    """'light' or 'dark' from the Riffle setting, or from Windows when set to follow it."""
+    t = features.settings().get('theme', 'system')
+    if t in ('light', 'dark'):
+        return t
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
+            return 'light' if winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] else 'dark'
+    except OSError:
+        return 'light'
+
+
+def start_quickbar(url):
+    """Create the hidden quick bar (native Tk window) so the hotkey shows it instantly."""
+    try:
+        import quickbar
+        import shellthumb
+    except Exception as e:
+        print(f'[riffle] quick bar unavailable: {e}')
+        return
+
+    def search(q, limit):
+        s = features.settings()
+        f = {}
+        if s.get('hideSystem', True):
+            f['hideSystem'] = True
+        if s.get('hideHidden', True):
+            f['hideHidden'] = True
+        if s.get('excludeDirs'):
+            f['excludeDirs'] = s['excludeDirs']
+        return ENGINE.quick(q, limit, f)
+
+    def open_app(q):
+        features._ctx['inbox'] = q                  # the window picks this up when it gets focus
+        if not focus_window():
+            open_window(url)
+
+    bar = quickbar.QuickBar(
+        search=search,
+        open_path=lambda p: shell_act('open', [p]),
+        reveal=lambda p: shell_act('reveal', [p]),
+        open_app=open_app,
+        icon_png=lambda p, ext: shellthumb.icon(p, ext or ('<dir>' if os.path.isdir(p) else ''), 32),
+        theme=_system_theme,
+    )
+    bar.start()
+    QUICK['bar'] = bar
 
 VK_NAMES = {'space': 0x20, 'enter': 0x0D, 'tab': 0x09, '`': 0xC0, ';': 0xBA, '/': 0xBF, '.': 0xBE}
 
@@ -1836,7 +2018,9 @@ from anywhere the moment it is running.
         msg = MSG()
         while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == 0x0312:                   # WM_HOTKEY
-                if not focus_window():
+                if QUICK['bar'] and features.settings().get('hotkeyOpens', 'bar') == 'bar':
+                    QUICK['bar'].toggle()               # the light quick bar
+                elif not focus_window():
                     open_window(url)
         u32.UnregisterHotKey(None, 1)                   # WM_QUIT: settings changed the combo
     except Exception:
@@ -1877,6 +2061,10 @@ def main():
     features._ctx['restart_hotkey'] = lambda: restart_hotkey(f'http://127.0.0.1:{PORT}')
     features._ctx['hotkey_state'] = HOTKEY
     features._ctx['reindex'] = lambda roots: ENGINE.reindex(roots)
+    features._ctx['cats'] = CATS
+    # warm the filter caches so the first quick search is instant
+    threading.Thread(target=lambda: (time.sleep(3), ENGINE.quick('', 1, {'hideSystem': True, 'hideHidden': True})),
+                     daemon=True).start()
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     url = f'http://127.0.0.1:{PORT}'
     print(f'[riffle] {url}')
@@ -1897,6 +2085,8 @@ def main():
 
     if '--no-window' not in sys.argv:
         open_window(url)
+    if IS_WIN and '--no-quickbar' not in sys.argv:
+        start_quickbar(url)                     # before the hotkey, so the first press is instant
     threading.Thread(target=hotkey_loop, args=(url,), daemon=True).start()
     threading.Thread(target=_visual_loop, daemon=True).start()
     try:
