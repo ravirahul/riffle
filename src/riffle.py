@@ -1,0 +1,1680 @@
+#!/usr/bin/env python3
+"""
+RIFFLE — instant filename search for Windows, with filters that actually stack.
+
+    pip install numpy
+    python riffle.py
+
+Opens its own window. Ctrl+Shift+Space summons it from anywhere.
+
+How it goes fast
+----------------
+Every filename is lowercased and packed into one long string separated by NULs,
+with a numpy offset array beside it. A substring query is then a single
+str.find() sweep over that blob -- C-speed memory scan, ~20 MB for a million
+files. Metadata (size, mtime, extension, category, parent dir) lives in parallel
+numpy arrays, so every filter is a vectorised boolean mask instead of a loop.
+
+Indexing happens in two phases so the tool is usable immediately:
+  phase 1  NTFS USN journal enumeration (Windows, elevated) -- the whole name
+           tree in a few seconds, no metadata
+  phase 2  threaded os.scandir walk -- fills in size and modified time
+If phase 1 is unavailable (not Windows, not elevated, not NTFS) phase 2 runs
+alone and does the whole job; it is slower to start but complete on its own.
+
+Once built, the index stays live: a watcher streams filesystem changes in and
+they are applied in batches. Names carry a floating-point sort rank so a new
+file can slot in between its neighbours instead of forcing a re-sort, and
+deletions become tombstones that later compaction sweeps away.
+"""
+
+import ctypes
+import io
+import json
+import mimetypes
+import os
+import pickle
+import re
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import numpy as np
+
+VERSION = '1.0.1'
+HERE = os.path.dirname(os.path.abspath(__file__))
+# Frozen builds (PyInstaller) unpack bundled resources to sys._MEIPASS;
+# running from source they sit next to this file.
+RES = getattr(sys, '_MEIPASS', HERE)
+
+ICON = next((f for f in (os.path.join(RES, 'riffle.ico'), os.path.join(HERE, 'packaging', 'riffle.ico'))
+             if os.path.exists(f)), None)
+APP_ID = 'Bliink.Riffle'
+DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'Riffle')
+os.makedirs(DATA_DIR, exist_ok=True)
+PORT = int(os.environ.get('RIFFLE_PORT', '8731'))
+CACHE = os.path.join(DATA_DIR, 'riffle-index.bin')
+if not os.path.exists(CACHE) and os.path.exists(os.path.join(HERE, 'riffle-index.bin')):
+    try:    # older builds kept the index beside the script
+        os.replace(os.path.join(HERE, 'riffle-index.bin'), CACHE)
+    except OSError:
+        pass
+IS_WIN = os.name == 'nt'
+MAX_HITS = 400000
+SEP = '\x00'
+
+# File categories, as stored in Index.cat (one uint8 per record).
+CATS = ['other', 'document', 'image', 'video', 'audio', 'code', 'archive', 'folder']
+CAT_OTHER, CAT_DOC, CAT_IMG, CAT_VID, CAT_AUD, CAT_CODE, CAT_ARC, CAT_DIR = range(8)
+_EXT_CAT = {}
+for _c, _exts in (
+    (CAT_DOC, 'pdf doc docx odt rtf txt md rst tex pages epub mobi xls xlsx ods csv tsv '
+              'ppt pptx odp key numbers pub one msg eml'),
+    (CAT_IMG, 'jpg jpeg png gif bmp webp tif tiff svg ico heic heif raw cr2 nef arw dng psd ai eps avif'),
+    (CAT_VID, 'mp4 mkv avi mov wmv flv webm m4v mpg mpeg 3gp ts vob ogv prproj'),
+    (CAT_AUD, 'mp3 wav flac aac ogg wma m4a opus aiff mid midi aup als flp'),
+    (CAT_CODE, 'py js ts jsx tsx html htm css scss sass less php rb go rs c h cpp hpp cc java kt swift '
+               'cs vb sh bash zsh ps1 bat cmd sql json yaml yml toml ini cfg conf xml liquid twig hbs '
+               'vue svelte lua pl r m ipynb gradle make cmake dockerfile env lock'),
+    (CAT_ARC, 'zip rar 7z tar gz bz2 xz iso dmg cab msi apk jar war deb rpm zst lz4'),
+):
+    for _e in _exts.split():
+        _EXT_CAT[_e] = _c
+
+
+# -- index ------------------------------------------------------------------
+# One record per file or folder; record ids are positions in the arrays.
+
+class Index:
+    """Packed, searchable snapshot of the filesystem."""
+
+    def __init__(self):
+        self.dirs = []                    # parent directory paths
+        self.dir_id = {}                  # path -> index into dirs
+        self.blob = b''                   # lowercased names, NUL separated
+        self.disp = b''                   # display names, NUL separated
+        self.arr = np.zeros(0, dtype=np.uint8)
+        self.off = np.zeros(1, dtype=np.int64)
+        self.doff = np.zeros(1, dtype=np.int64)
+        self.parent = np.zeros(0, dtype=np.int32)
+        self.size = np.zeros(0, dtype=np.int64)
+        self.mtime = np.zeros(0, dtype=np.int64)
+        self.cat = np.zeros(0, dtype=np.uint8)
+        self.rank = np.zeros(0, dtype=np.float64)
+        self.order = np.zeros(0, dtype=np.int64)
+        self.dirrank = np.zeros(0, dtype=np.int32)
+        self.dead = np.zeros(0, dtype=bool)
+        self.ndead = 0
+        self.gen = 0                      # bumped on every change
+        self.exts = []
+        self.ext_id = {}
+        self.extv = np.zeros(0, dtype=np.int32)
+        self.n = 0
+        self.enriched = False
+        self.built_at = 0.0
+        self.roots = []
+        self._scope_cache = {}
+
+    # -- interning: each distinct dir / extension stored once ----------------
+    def dir_index(self, path: str) -> int:
+        i = self.dir_id.get(path)
+        if i is None:
+            i = len(self.dirs)
+            self.dirs.append(path)
+            self.dir_id[path] = i
+        return i
+
+    def ext_index(self, e: str) -> int:
+        i = self.ext_id.get(e)
+        if i is None:
+            i = len(self.exts)
+            self.exts.append(e)
+            self.ext_id[e] = i
+        return i
+
+    def build(self, records):
+        """records: iterable of (name, parent_dir_path, is_dir, size, mtime)."""
+        lo_parts, di_parts = [], []
+        off, doff, par, siz, mt, cat, ext = [], [], [], [], [], [], []
+        lpos = dpos = 0
+        for name, pdir, is_dir, size, mtime in records:
+            lb = name.lower().encode('utf-8', 'surrogatepass')
+            db = name.encode('utf-8', 'surrogatepass')
+            off.append(lpos); doff.append(dpos)
+            lo_parts.append(lb); di_parts.append(db)
+            lpos += len(lb) + 1
+            dpos += len(db) + 1
+            par.append(self.dir_index(pdir))
+            siz.append(size); mt.append(mtime)
+            if is_dir:
+                cat.append(CAT_DIR); ext.append(self.ext_index(''))
+            else:
+                d = name.rfind('.')
+                e = name[d + 1:].lower() if 0 < d < len(name) - 1 and len(name) - d <= 12 else ''
+                ext.append(self.ext_index(e))
+                cat.append(_EXT_CAT.get(e, CAT_OTHER))
+        off.append(lpos); doff.append(dpos)
+
+        self.blob = b'\x00'.join(lo_parts) + (b'\x00' if lo_parts else b'')
+        self.disp = b'\x00'.join(di_parts) + (b'\x00' if di_parts else b'')
+        self.off = np.array(off, dtype=np.int64)
+        self.doff = np.array(doff, dtype=np.int64)
+        self.parent = np.array(par, dtype=np.int32)
+        self.size = np.array(siz, dtype=np.int64)
+        self.mtime = np.array(mt, dtype=np.int64)
+        self.cat = np.array(cat, dtype=np.uint8)
+        self.extv = np.array(ext, dtype=np.int32)
+        self.n = len(par)
+        self.built_at = time.time()
+        self.finalize()
+
+    def finalize(self):
+        """Derive the uint8 view, the alphabetical rank, and the sorted order.
+
+        Sorting a subset by name would otherwise mean pulling out N Python
+        strings and comparing them, which dominated every query. Instead each
+        name's position in the full ordering is computed once, so sorting any
+        subset later is a plain argsort in C.
+
+        The rank is a float, not an integer, so a file appearing later can be
+        given a rank halfway between its two neighbours instead of forcing a
+        re-sort of everything. `order` keeps the ids in name order so that
+        insertion point can be found by binary search."""
+        self.arr = np.frombuffer(self.blob, dtype=np.uint8)
+        n = self.n
+        if n == 0:
+            self.rank = np.zeros(0, dtype=np.float64)
+            self.order = np.zeros(0, dtype=np.int64)
+            self.dead = np.zeros(0, dtype=bool)
+            self.dirrank = np.zeros(len(self.dirs), dtype=np.int32)
+            return
+        if self.dead.size != n:
+            self.dead = np.zeros(n, dtype=bool)
+            self.ndead = 0
+        if self.rank.size != n or self.order.size != n:
+            parts = self.blob.split(b'\x00')[:n]
+            if len(parts) < n:
+                parts += [b''] * (n - len(parts))
+            order = np.argsort(np.array(parts, dtype='S96'), kind='stable')
+            rank = np.empty(n, dtype=np.float64)
+            rank[order] = np.arange(n, dtype=np.float64)
+            self.rank, self.order = rank, order.astype(np.int64)
+        if self.dirrank.size != len(self.dirs):
+            self._rebuild_dirrank()
+        self._scope_cache = {}
+
+    def _rebuild_dirrank(self):
+        if not self.dirs:
+            self.dirrank = np.zeros(0, dtype=np.int32)
+            return
+        keys = np.array([d.lower().encode('utf-8', 'surrogatepass') for d in self.dirs],
+                        dtype='S260')
+        dorder = np.argsort(keys, kind='stable')
+        dr = np.empty(len(self.dirs), dtype=np.int32)
+        dr[dorder] = np.arange(len(self.dirs), dtype=np.int32)
+        self.dirrank = dr
+
+    # -- live updates --------------------------------------------------------
+    def name_bytes(self, i):
+        return self.blob[self.off[i]:self.off[i + 1] - 1]
+
+    def find_id(self, lname: bytes, parent_id: int):
+        """Locate a live record by exact lowercased name + parent. Binary search
+        over `order` narrows to the names that match, then parent decides."""
+        if self.n == 0:
+            return -1
+        lo, hi = 0, self.order.size
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.name_bytes(self.order[mid]) < lname:
+                lo = mid + 1
+            else:
+                hi = mid
+        while lo < self.order.size and self.name_bytes(self.order[lo]) == lname:
+            j = int(self.order[lo])
+            if self.parent[j] == parent_id and not self.dead[j]:
+                return j
+            lo += 1
+        return -1
+
+    def _insert_pos(self, lname: bytes):
+        """Index in `order` where lname belongs alphabetically."""
+        lo, hi = 0, self.order.size
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.name_bytes(self.order[mid]) < lname:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _ranks_for_batch(self, lnames):
+        """Ranks for a batch of new names, computed in one pass.
+
+        Ranks must come out strictly increasing in alphabetical order, including
+        among the new names themselves. Computing each independently against the
+        old order collides whenever two new names fall in the same gap, which
+        silently corrupts the binary search that everything else depends on. So
+        the batch is sorted, grouped by insertion point, and each group spread
+        evenly across the gap it lands in.
+
+        Returns (ranks aligned to lnames, whether a full renormalize is needed).
+        """
+        n = len(lnames)
+        if n == 0:
+            return [], False
+        if self.order.size == 0:
+            idx = sorted(range(n), key=lambda i: lnames[i])
+            out = [0.0] * n
+            for r, i in enumerate(idx):
+                out[i] = float(r)
+            return out, False
+
+        by_name = sorted(range(n), key=lambda i: lnames[i])
+        pos = [self._insert_pos(lnames[i]) for i in by_name]
+        out = [0.0] * n
+        need_renorm = False
+
+        i = 0
+        while i < len(by_name):
+            j = i
+            while j + 1 < len(by_name) and pos[j + 1] == pos[i]:
+                j += 1
+            p, m = pos[i], j - i + 1
+            if p == 0:
+                hi = float(self.rank[self.order[0]]); lo = hi - 1.0
+            elif p >= self.order.size:
+                lo = float(self.rank[self.order[-1]]); hi = lo + 1.0
+            else:
+                lo = float(self.rank[self.order[p - 1]])
+                hi = float(self.rank[self.order[p]])
+            step = (hi - lo) / (m + 1)
+            for k in range(m):
+                r = lo + step * (k + 1)
+                if not lo < r < hi:
+                    need_renorm = True   # float precision ran out in this gap
+                    r = lo
+                out[by_name[i + k]] = r
+            i = j + 1
+        return out, need_renorm
+
+    def add_records(self, recs):
+        """Append (name, parent_dir, is_dir, size, mtime) rows to a live index."""
+        recs = [r for r in recs if r[0]]
+        if not recs:
+            return 0
+        lnames = [r[0].lower().encode('utf-8', 'surrogatepass') for r in recs]
+        rank_add, need_renorm = self._ranks_for_batch(lnames)
+
+        lo_add, di_add = [], []
+        off_add, doff_add, par_add, siz_add, mt_add, cat_add, ext_add = [], [], [], [], [], [], []
+        lpos, dpos = int(self.off[-1]), int(self.doff[-1])
+        for (name, pdir, is_dir, size, mtime), lb in zip(recs, lnames):
+            db = name.encode('utf-8', 'surrogatepass')
+            lo_add.append(lb); di_add.append(db)
+            off_add.append(lpos); doff_add.append(dpos)
+            lpos += len(lb) + 1; dpos += len(db) + 1
+            par_add.append(self.dir_index(pdir))
+            siz_add.append(size); mt_add.append(mtime)
+            if is_dir:
+                cat_add.append(CAT_DIR); ext_add.append(self.ext_index(''))
+            else:
+                d = name.rfind('.')
+                e = name[d + 1:].lower() if 0 < d < len(name) - 1 and len(name) - d <= 12 else ''
+                ext_add.append(self.ext_index(e))
+                cat_add.append(_EXT_CAT.get(e, CAT_OTHER))
+
+        k = len(recs)
+        base = self.n
+        self.blob = self.blob + b'\x00'.join(lo_add) + b'\x00'
+        self.disp = self.disp + b'\x00'.join(di_add) + b'\x00'
+        self.arr = np.frombuffer(self.blob, dtype=np.uint8)
+        self.off = np.concatenate([self.off[:-1], np.array(off_add, dtype=np.int64),
+                                   np.array([lpos], dtype=np.int64)])
+        self.doff = np.concatenate([self.doff[:-1], np.array(doff_add, dtype=np.int64),
+                                    np.array([dpos], dtype=np.int64)])
+        self.parent = np.concatenate([self.parent, np.array(par_add, dtype=np.int32)])
+        self.size = np.concatenate([self.size, np.array(siz_add, dtype=np.int64)])
+        self.mtime = np.concatenate([self.mtime, np.array(mt_add, dtype=np.int64)])
+        self.cat = np.concatenate([self.cat, np.array(cat_add, dtype=np.uint8)])
+        self.extv = np.concatenate([self.extv, np.array(ext_add, dtype=np.int32)])
+        self.rank = np.concatenate([self.rank, np.array(rank_add, dtype=np.float64)])
+        self.dead = np.concatenate([self.dead, np.zeros(k, dtype=bool)])
+        self.n = base + k
+        new_ids = np.arange(base, base + k, dtype=np.int64)
+        self.order = np.concatenate([self.order, new_ids])
+        self.order = self.order[np.argsort(self.rank[self.order], kind='stable')]
+        if self.dirrank.size != len(self.dirs):
+            self._rebuild_dirrank()
+            self._scope_cache = {}
+        if need_renorm:
+            self.renormalize_full()
+        self.gen += 1
+        return k
+
+    def remove_ids(self, ids):
+        if not len(ids):
+            return 0
+        ids = np.asarray(ids, dtype=np.int64)
+        fresh = ids[~self.dead[ids]]
+        if not fresh.size:
+            return 0
+        self.dead[fresh] = True
+        self.ndead += int(fresh.size)
+        self.gen += 1
+        return int(fresh.size)
+
+    def touch(self, i, size, mtime):
+        self.size[i] = size
+        self.mtime[i] = mtime
+        self.gen += 1
+
+    def renormalize_full(self):
+        """Rebuild ranks straight from the names. Used when float precision runs
+        out in some gap -- respacing alone would not repair it, since the order
+        array itself is then untrustworthy."""
+        n = self.n
+        if n == 0:
+            return
+        parts = self.blob.split(b'\x00')[:n]
+        if len(parts) < n:
+            parts += [b''] * (n - len(parts))
+        order = np.argsort(np.array(parts, dtype='S96'), kind='stable')
+        rank = np.empty(n, dtype=np.float64)
+        rank[order] = np.arange(n, dtype=np.float64)
+        self.rank, self.order = rank, order.astype(np.int64)
+
+    def compact(self):
+        """Physically drop tombstoned records. Cheap enough to run occasionally
+        and keeps the blob from growing without bound in a long session."""
+        if self.ndead == 0:
+            return
+        keep = np.flatnonzero(~self.dead)
+        recs = []
+        for i in keep.tolist():
+            recs.append((self.name(i), self.dirs[self.parent[i]],
+                         self.cat[i] == CAT_DIR, int(self.size[i]), int(self.mtime[i])))
+        roots, enriched = self.roots, self.enriched
+        self.dirs = []; self.dir_id = {}
+        self.exts = []; self.ext_id = {}
+        self.rank = np.zeros(0, dtype=np.float64)
+        self.order = np.zeros(0, dtype=np.int64)
+        self.dead = np.zeros(0, dtype=bool); self.ndead = 0
+        self.build(recs)
+        self.roots, self.enriched = roots, enriched
+        self.gen += 1
+
+    def scope_mask(self, prefix, contains=False):
+        """Cached per-directory boolean mask for path scoping."""
+        key = (prefix, contains)
+        m = self._scope_cache.get(key)
+        if m is None:
+            if contains:
+                m = np.array([prefix in d.lower() for d in self.dirs], dtype=bool)
+            else:
+                m = np.array([d.lower().startswith(prefix) for d in self.dirs], dtype=bool)
+            if len(self._scope_cache) > 64:
+                self._scope_cache.clear()
+            self._scope_cache[key] = m
+        return m
+
+    # -- accessors -----------------------------------------------------------
+    def name(self, i: int) -> str:
+        return self.disp[self.doff[i]:self.doff[i + 1] - 1].decode('utf-8', 'replace')
+
+    def path(self, i: int) -> str:
+        d = self.dirs[self.parent[i]]
+        return d + ('' if d.endswith(('\\', '/')) else os.sep) + self.name(i)
+
+    # -- persistence ---------------------------------------------------------
+    def save(self, path):
+        tmp = path + '.tmp'
+        with open(tmp, 'wb') as f:
+            pickle.dump({
+                'v': 3, 'dirs': self.dirs, 'blob': self.blob, 'disp': self.disp,
+                'off': self.off, 'doff': self.doff, 'parent': self.parent,
+                'size': self.size, 'mtime': self.mtime, 'cat': self.cat,
+                'exts': self.exts, 'extv': self.extv, 'n': self.n,
+                'enriched': self.enriched, 'built_at': self.built_at, 'roots': self.roots,
+                'rank': self.rank, 'dirrank': self.dirrank, 'order': self.order,
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def load(path):
+        with open(path, 'rb') as f:
+            d = pickle.load(f)
+        if d.get('v') != 3:
+            raise ValueError('stale index format')
+        ix = Index()
+        ix.dirs = d['dirs']; ix.dir_id = {p: i for i, p in enumerate(ix.dirs)}
+        ix.blob = d['blob']; ix.disp = d['disp']
+        ix.off = d['off']; ix.doff = d['doff']; ix.parent = d['parent']
+        ix.size = d['size']; ix.mtime = d['mtime']; ix.cat = d['cat']
+        ix.exts = d['exts']; ix.ext_id = {e: i for i, e in enumerate(ix.exts)}
+        ix.extv = d['extv']; ix.n = d['n']; ix.enriched = d['enriched']
+        ix.built_at = d['built_at']; ix.roots = d.get('roots', [])
+        r = d.get('rank'); dr = d.get('dirrank'); od = d.get('order')
+        ix.rank = np.asarray(r, dtype=np.float64) if r is not None else np.zeros(0, dtype=np.float64)
+        ix.order = np.asarray(od, dtype=np.int64) if od is not None else np.zeros(0, dtype=np.int64)
+        ix.dirrank = dr if dr is not None else np.zeros(0, dtype=np.int32)
+        ix.arr = np.frombuffer(ix.blob, dtype=np.uint8)
+        ix.finalize()
+        return ix
+
+
+# -- scanning ---------------------------------------------------------------
+# Paths containing any of these fragments are never indexed.
+
+POLL_SECONDS = 8
+SKIP_FRAGMENTS = ('\\$recycle.bin', '\\system volume information', '\\appdata\\local\\temp',
+                  '\\windows\\prefetch', '\\windows\\winsxs', '\\.git\\', '\\visual-index\\',
+                  DATA_DIR.lower() + '\\')
+SKIP_DIRS = {'$windows.~bt', 'system volume information', '.git', 'node_modules_cache',
+             '$recycle.bin', '$windows.~ws',
+             'visual-index'}
+
+# Riffle's own data dir is skipped by path: its cache churns constantly.
+DATA_LOWER = DATA_DIR.lower()
+
+
+def scan_tree(roots, progress=None, skip_names=SKIP_DIRS):
+    """Threaded os.scandir walk. On Windows DirEntry.stat() is free -- the values
+come back with the directory enumeration -- so this collects metadata at no
+extra syscall cost."""
+    out = []
+    lock = threading.Lock()
+    pending = list(roots)
+    count = [0]
+
+    def work(d):
+        local, subs = [], []
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    try:
+                        is_dir = e.is_dir(follow_symlinks=False)
+                        st = e.stat(follow_symlinks=False)
+                        local.append((e.name, d, is_dir, 0 if is_dir else st.st_size,
+                                      int(st.st_mtime)))
+                        if is_dir and e.name.lower() not in skip_names and e.path.lower() != DATA_LOWER:
+                            subs.append(e.path)
+                    except OSError:
+                        continue
+        except OSError:
+            return []
+        with lock:
+            out.extend(local)
+            count[0] += len(local)
+            if progress and count[0] % 20000 < len(local):
+                progress(count[0])
+        return subs
+
+    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4) * 2)) as ex:   # breadth-first waves
+        while pending:
+            futs = [ex.submit(work, d) for d in pending]
+            pending = []
+            for f in futs:
+                pending.extend(f.result())
+    return out
+
+
+# -- NTFS fast path -----------------------------------------------------------
+def usn_enumerate(letter):
+    """Enumerate every MFT record on an NTFS volume through the USN journal.
+Returns {frn: (name, parent_frn, is_dir)} or None if unavailable.
+Needs an elevated process; fails cleanly otherwise."""
+    if not IS_WIN:
+        return None
+    try:
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        GENERIC_READ = 0x80000000
+        FILE_SHARE = 3                      # read | write
+        OPEN_EXISTING = 3
+        INVALID = ctypes.c_void_p(-1).value
+        FSCTL_ENUM_USN_DATA = 0x900B3
+        FILE_ATTRIBUTE_DIRECTORY = 0x10
+
+        k32.CreateFileW.restype = ctypes.c_void_p
+        h = k32.CreateFileW(ctypes.c_wchar_p(f'\\\\.\\{letter}:'), GENERIC_READ,
+                            FILE_SHARE, None, OPEN_EXISTING, 0, None)
+        if h in (INVALID, 0, None):
+            return None
+
+        class MFT_ENUM_DATA(ctypes.Structure):
+            _fields_ = [('StartFileReferenceNumber', ctypes.c_ulonglong),
+                        ('LowUsn', ctypes.c_longlong),
+                        ('HighUsn', ctypes.c_longlong)]
+
+        med = MFT_ENUM_DATA(0, 0, 0x7FFFFFFFFFFFFFFF)
+        buf = ctypes.create_string_buffer(1 << 20)
+        ret = ctypes.c_ulong(0)
+        table = {}
+        try:
+            while True:
+                ok = k32.DeviceIoControl(ctypes.c_void_p(h), FSCTL_ENUM_USN_DATA,
+                                         ctypes.byref(med), ctypes.sizeof(med),
+                                         buf, ctypes.sizeof(buf),
+                                         ctypes.byref(ret), None)
+                if not ok or ret.value <= 8:
+                    break
+                data = buf.raw[:ret.value]
+                med.StartFileReferenceNumber = int.from_bytes(data[:8], 'little')
+                p = 8
+                while p + 60 <= len(data):
+                    rlen = int.from_bytes(data[p:p + 4], 'little')
+                    if rlen < 60 or p + rlen > len(data):
+                        break
+                    major = int.from_bytes(data[p + 4:p + 6], 'little')
+                    if major == 2:                  # USN_RECORD_V2
+                        frn = int.from_bytes(data[p + 8:p + 16], 'little')
+                        pfrn = int.from_bytes(data[p + 16:p + 24], 'little')
+                        attrs = int.from_bytes(data[p + 52:p + 56], 'little')
+                        nlen = int.from_bytes(data[p + 56:p + 58], 'little')
+                        noff = int.from_bytes(data[p + 58:p + 60], 'little')
+                        if 0 < nlen and p + noff + nlen <= len(data):
+                            nm = data[p + noff:p + noff + nlen].decode('utf-16-le', 'replace')
+                            table[frn] = (nm, pfrn, bool(attrs & FILE_ATTRIBUTE_DIRECTORY))
+                    p += rlen
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        return table or None
+    except Exception:
+        return None
+
+
+def usn_records(letter):
+    """Turn a USN table into (name, parent_dir, is_dir, size, mtime) records.
+Sizes and times arrive later from the scandir pass."""
+    table = usn_enumerate(letter)
+    if not table:
+        return None
+    root = f'{letter}:\\'
+    path_cache = {}
+
+    def resolve(frn, depth=0):
+        if depth > 96:
+            return None
+        p = path_cache.get(frn)
+        if p is not None:
+            return p
+        ent = table.get(frn)
+        if ent is None:
+            return None
+        nm, pfrn, _ = ent
+        if pfrn == frn or pfrn not in table:
+            p = root
+        else:
+            up = resolve(pfrn, depth + 1)
+            p = root if up is None else up.rstrip('\\') + '\\' + nm
+        path_cache[frn] = p
+        return p
+
+    recs = []
+    for frn, (nm, pfrn, is_dir) in table.items():
+        parent = resolve(pfrn) if pfrn in table else root
+        if parent is None:
+            continue
+        recs.append((nm, parent, is_dir, 0, 0))
+    return recs
+
+
+# -- live updates -------------------------------------------------------------
+# ReadDirectoryChangesW on Windows, a polling snapshot diff elsewhere.
+
+class Watcher(threading.Thread):
+    """Streams filesystem changes into a queue of (kind, path) pairs.
+
+kind is "add", "del" or "mod". Paths are absolute. The engine drains the
+queue on a timer and patches the index, so a burst of a thousand changes
+costs one batched update rather than a thousand.
+"""
+    def __init__(self, roots, sink):
+        super().__init__(daemon=True)
+        self.roots = roots
+        self.sink = sink
+        self.stop_flag = threading.Event()
+        self.alive_mode = 'none'
+
+    def run(self):
+        if IS_WIN:
+            try:
+                self.alive_mode = 'win32'
+                self._run_win()
+                return
+            except Exception:
+                self.alive_mode = 'poll'
+        else:
+            self.alive_mode = 'poll'
+        self._run_poll()
+
+    # One ReadDirectoryChangesW thread per root.
+    def _run_win(self):
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        FILE_LIST_DIRECTORY = 0x0001
+        FILE_SHARE = 0x7                            # read | write | delete
+        OPEN_EXISTING = 3
+        FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+        NOTIFY = 0x1B                               # file name | dir name | size | last write
+        # FILE_ACTION_*: added, removed, modified, renamed-old, renamed-new.
+        # A rename is reported as a delete of the old name plus an add of
+        # the new one, which is exactly how the index wants to see it.
+        ACTIONS = {1: 'add', 2: 'del', 3: 'mod', 4: 'del', 5: 'add'}
+        k32.CreateFileW.restype = ctypes.c_void_p
+        INVALID = ctypes.c_void_p(-1).value
+
+        handles = []
+        for root in self.roots:
+            h = k32.CreateFileW(ctypes.c_wchar_p(root), FILE_LIST_DIRECTORY, FILE_SHARE,
+                                None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None)
+            if h not in (INVALID, 0, None):
+                handles.append((root, h))
+        if not handles:
+            raise OSError('no watchable roots')
+
+        threads = []
+        for root, h in handles:
+            t = threading.Thread(target=self._watch_one, args=(k32, root, h, NOTIFY, ACTIONS),
+                                 daemon=True)
+            t.start()
+            threads.append(t)
+        while not self.stop_flag.is_set():
+            time.sleep(0.4)
+
+    def _watch_one(self, k32, root, handle, notify, actions):
+        buf = ctypes.create_string_buffer(64 * 1024)
+        ret = ctypes.c_ulong(0)
+        while not self.stop_flag.is_set():
+            ok = k32.ReadDirectoryChangesW(ctypes.c_void_p(handle), buf, ctypes.sizeof(buf),
+                                           True, notify, ctypes.byref(ret), None, None)
+            if not ok or ret.value == 0:
+                time.sleep(0.5)
+                continue
+            data = buf.raw[:ret.value]
+            p = 0
+            while p + 12 <= len(data):
+                nxt = int.from_bytes(data[p:p + 4], 'little')
+                action = int.from_bytes(data[p + 4:p + 8], 'little')
+                nlen = int.from_bytes(data[p + 8:p + 12], 'little')
+                if p + 12 + nlen > len(data):
+                    break
+                rel = data[p + 12:p + 12 + nlen].decode('utf-16-le', 'replace')
+                kind = actions.get(action)
+                if kind and rel:
+                    full = os.path.join(root, rel)
+                    if not any(s in full.lower() for s in SKIP_FRAGMENTS):
+                        self.sink(kind, full)
+                if nxt == 0:
+                    break
+                p += nxt
+
+    # Fallback for non-Windows hosts and volumes that refuse a directory handle.
+    def _run_poll(self):
+        """Walks the tree and compares against a remembered snapshot. Only used
+        where the native watcher is unavailable; deliberately gentle, since this
+        is a full stat sweep."""
+        prev = {}
+        first = True
+        while not self.stop_flag.is_set():
+            cur = {}
+            try:
+                for name, pdir, is_dir, size, mtime in scan_tree(self.roots):
+                    sep = '' if pdir.endswith(('\\', '/')) else os.sep
+                    cur[pdir + sep + name] = (size, mtime, is_dir)
+            except Exception:
+                pass
+            if not first:
+                for p, v in cur.items():
+                    old = prev.get(p)
+                    if old is None:
+                        self.sink('add', p)
+                    elif old[:2] != v[:2]:
+                        self.sink('mod', p)
+                for p in prev:
+                    if p not in cur:
+                        self.sink('del', p)
+            prev = cur
+            first = False
+            for _ in range(POLL_SECONDS * 2):
+                if self.stop_flag.is_set():
+                    return
+                time.sleep(0.5)
+
+    def stop(self):
+        self.stop_flag.set()
+
+
+# -- engine -------------------------------------------------------------------
+# Owns the live Index, applies watcher batches, and answers queries.
+class Engine:
+    def __init__(self):
+        self.ix = Index()
+        self.state = 'empty'            # empty | scanning | enriching | ready
+        self.progress = 0
+        self.message = 'No index yet'
+        self.lock = threading.RLock()
+        self.watcher = None
+        self.pending = []
+        self.pend_lock = threading.Lock()
+        self.live = False
+        self.live_adds = 0
+        self.live_dels = 0
+        self.last_change = 0.0
+        threading.Thread(target=self._drain_loop, daemon=True).start()
+
+    # -- live index maintenance ------------------------------------------------
+    def on_change(self, kind, path):
+        with self.pend_lock:
+            if len(self.pending) < 60000:     # drop the flood, keep the app alive
+                self.pending.append((kind, path))
+
+    def start_watch(self, roots):
+        if self.watcher:
+            self.watcher.stop()
+        self.watcher = Watcher(roots, self.on_change)
+        self.watcher.start()
+        self.live = True
+
+    def _drain_loop(self):
+        while True:
+            time.sleep(0.8)
+            try:
+                self._drain()
+            except Exception:
+                continue
+
+    def _drain(self):
+        with self.pend_lock:
+            if not self.pending:
+                return
+            batch, self.pending = self.pending, []
+        if self.state not in ('ready', 'enriching'):
+            return
+
+        # Collapse to the latest event per path, then trust the filesystem: a
+        # file created and deleted inside one window simply never appears.
+        latest = {}
+        for kind, path in batch:
+            latest[os.path.normpath(path)] = kind
+        # Let the visual index know which files moved under it.
+        visual_touched(latest)
+
+        adds, dels, mods = [], [], []
+        for path, kind in latest.items():
+            exists = os.path.lexists(path)
+            if kind == 'del' or not exists:
+                if not exists:
+                    dels.append(path)
+                continue
+            (adds if kind == 'add' else mods).append(path)
+
+        with self.lock:
+            ix = self.ix
+            removed = 0
+            gone = []
+            for path in dels:
+                pdir, nm = os.path.split(path)
+                pid = ix.dir_id.get(pdir)
+                if pid is None:
+                    continue
+                j = ix.find_id(nm.lower().encode('utf-8', 'surrogatepass'), pid)
+                if j >= 0:
+                    gone.append(j)
+            if gone:
+                removed = ix.remove_ids(gone)
+
+            fresh = []
+            for path in adds + mods:
+                pdir, nm = os.path.split(path)
+                if not nm:
+                    continue
+                try:
+                    st = os.stat(path, follow_symlinks=False)
+                    is_dir = os.path.isdir(path)
+                    size = 0 if is_dir else st.st_size
+                    mtime = int(st.st_mtime)
+                except OSError:
+                    continue
+                pid = ix.dir_id.get(pdir)      # already indexed? then update in place
+                j = ix.find_id(nm.lower().encode('utf-8', 'surrogatepass'), pid) if pid is not None else -1
+                if j >= 0:
+                    ix.touch(j, size, mtime)
+                else:
+                    fresh.append((nm, pdir, is_dir, size, mtime))
+            added = ix.add_records(fresh) if fresh else 0
+
+            if removed or added:
+                self.live_adds += added
+                self.live_dels += removed
+                self.last_change = time.time()
+                if ix.ndead > 40000 and ix.ndead > ix.n * 0.12:
+                    ix.compact()
+
+    # -- search ------------------------------------------------------------------
+    def _scan(self, needle: bytes):
+        """Byte positions of every occurrence of `needle` in the name blob.
+
+        Rather than looping str.find in Python, this seeds on all positions of
+        the needle's rarest-looking byte and then narrows the candidate array
+        one byte at a time. Every step is a numpy comparison over C memory, so a
+        13 MB blob costs single-digit milliseconds regardless of hit count."""
+        arr = self.ix.arr
+        L = len(needle)
+        if L == 0 or arr.size < L:
+            return np.zeros(0, dtype=np.int64)
+        limit = arr.size - L + 1
+        # Seed on a consonant if there is one: vowels and separators are
+        # everywhere, so they make the largest first candidate set.
+        best, bi = 0, 0
+        for i, b in enumerate(needle):
+            score = 3 if b not in b'aeiou_- .' else 1
+            if score > best:
+                best, bi = score, i
+        cand = np.flatnonzero(arr[bi:bi + limit] == needle[bi])
+        for i in range(L):
+            if cand.size == 0 or i == bi:
+                continue
+            cand = cand[arr[cand + i] == needle[i]]
+        return cand
+
+    def _ids_for(self, needle: bytes):
+        pos = self._scan(needle)
+        if pos.size == 0:
+            return np.zeros(0, dtype=np.int64)
+        if pos.size > MAX_HITS:
+            pos = pos[:MAX_HITS]
+        ids = np.searchsorted(self.ix.off, pos, side='right') - 1
+        ids = np.unique(ids)
+        ids = ids[(ids >= 0) & (ids < self.ix.n)]
+        return ids[~self.ix.dead[ids]] if self.ix.ndead else ids
+
+    def _raw_hits(self, q, mode):
+        """Sorted unique record ids whose name matches q."""
+        ix = self.ix
+        if ix.n == 0:
+            return np.zeros(0, dtype=np.int64)
+        if not q or not q.strip():
+            ids = np.arange(ix.n, dtype=np.int64)
+            return ids[~ix.dead] if ix.ndead else ids
+
+        if mode == 'regex':
+            try:
+                rx = re.compile(q.encode('utf-8', 'surrogatepass'), re.IGNORECASE)
+            except (re.error, UnicodeError):
+                return np.zeros(0, dtype=np.int64)
+            pos = [m.start() for m, _ in zip(rx.finditer(ix.blob), range(MAX_HITS))
+                   if b'\x00' not in m.group(0)]
+            if not pos:
+                return np.zeros(0, dtype=np.int64)
+            ids = np.unique(np.searchsorted(ix.off, np.asarray(pos, dtype=np.int64),
+                                            side='right') - 1)
+            ids = ids[(ids >= 0) & (ids < ix.n)]
+            return ids[~ix.dead[ids]] if ix.ndead else ids
+
+        if mode == 'fuzzy':
+            chars = [c for c in q.lower() if not c.isspace()]
+            if not chars:
+                return np.arange(ix.n, dtype=np.int64)
+            pat = b'[^\x00]*?'.join(re.escape(c.encode('utf-8', 'surrogatepass'))
+                                    for c in chars)
+            try:
+                rx = re.compile(pat)
+            except re.error:
+                return np.zeros(0, dtype=np.int64)
+            pos, p = [], 0          # one match per name: resume at the next one
+            while len(pos) < MAX_HITS:
+                m = rx.search(ix.blob, p)
+                if not m:
+                    break
+                pos.append(m.start())
+                nxt = ix.blob.find(b'\x00', m.start())
+                p = nxt + 1 if nxt >= 0 else len(ix.blob)
+            if not pos:
+                return np.zeros(0, dtype=np.int64)
+            ids = np.unique(np.searchsorted(ix.off, np.asarray(pos, dtype=np.int64),
+                                            side='right') - 1)
+            ids = ids[(ids >= 0) & (ids < ix.n)]
+            return ids[~ix.dead[ids]] if ix.ndead else ids
+
+        # Plain mode: every term must appear; longest (rarest) term first.
+        terms = [t.encode('utf-8', 'surrogatepass') for t in q.lower().split() if t]
+        if not terms:
+            return np.arange(ix.n, dtype=np.int64)
+        terms.sort(key=len, reverse=True)
+        ids = self._ids_for(terms[0])
+        for t in terms[1:]:
+            if ids.size == 0:
+                break
+            ids = np.intersect1d(ids, self._ids_for(t), assume_unique=True)
+        return ids
+
+    # filters: kind, cats, exts, sizeMin/Max, timeMin/Max, scope, exclude
+    def _apply(self, idx, f):
+        ix = self.ix
+        if idx.size == 0:
+            return idx
+        m = np.ones(idx.size, dtype=bool)
+
+        kind = f.get('kind', 'all')
+        if kind == 'files':
+            m &= ix.cat[idx] != CAT_DIR
+        elif kind == 'folders':
+            m &= ix.cat[idx] == CAT_DIR
+
+        cats = f.get('cats') or []
+        if cats:
+            want = np.array([CATS.index(c) for c in cats if c in CATS], dtype=np.uint8)
+            if want.size:
+                m &= np.isin(ix.cat[idx], want)
+
+        exts = [e.lower().lstrip('.') for e in (f.get('exts') or []) if e.strip()]
+        if exts:
+            ids = np.array([ix.ext_id[e] for e in exts if e in ix.ext_id], dtype=np.int32)
+            if ids.size:
+                m &= np.isin(ix.extv[idx], ids)
+            else:
+                m[:] = False                # none of the asked-for extensions exist
+
+        smin, smax = f.get('sizeMin'), f.get('sizeMax')
+        if smin is not None:
+            m &= ix.size[idx] >= int(smin)
+        if smax is not None:
+            m &= ix.size[idx] <= int(smax)
+
+        tmin, tmax = f.get('timeMin'), f.get('timeMax')
+        if tmin is not None:
+            m &= ix.mtime[idx] >= int(tmin)
+        if tmax is not None:
+            m &= ix.mtime[idx] <= int(tmax)
+
+        scope = (f.get('scope') or '').strip().lower().replace('/', os.sep)
+        if scope:
+            m &= ix.scope_mask(scope)[ix.parent[idx]]
+
+        exclude = (f.get('exclude') or '').strip().lower().replace('/', os.sep)
+        if exclude:
+            m &= ~ix.scope_mask(exclude, contains=True)[ix.parent[idx]]
+
+        return idx[m]
+
+    # The one call the UI makes for every keystroke.
+    def query(self, q, mode, filters, sort, desc, offset, limit):
+        with self.lock:
+            ix = self.ix
+            t0 = time.perf_counter()
+            hits = self._raw_hits(q or '', mode)
+            faceted = bool(filters.get('cats')) or bool(filters.get('exts'))
+            if faceted:
+                base = self._apply(hits, {k: v for k, v in filters.items()
+                                          if k not in ('cats', 'exts')})
+                sel = self._apply(hits, filters)
+            else:
+                base = sel = self._apply(hits, filters)
+
+            # Category counts come from `base` (before the category/extension
+            # facets), so the chips show what each choice would give.
+            cat_counts = np.bincount(ix.cat[base], minlength=8).tolist() if base.size else [0] * 8
+
+            # Histograms for the time and size sliders.
+            hist = {'time': [], 'size': [], 'tmin': 0, 'tmax': 0}
+            if sel.size:
+                mt = ix.mtime[sel]
+                mt = mt[mt > 0]
+                if mt.size:
+                    lo, hi = int(mt.min()), int(mt.max())
+                    if hi <= lo:
+                        hi = lo + 1
+                    counts, edges = np.histogram(mt, bins=48, range=(lo, hi))
+                    hist['time'] = counts.tolist()
+                    hist['tmin'], hist['tmax'] = lo, hi
+                sz = ix.size[sel]
+                lg = np.log10(np.maximum(sz.astype(np.float64), 1.0))
+                counts, _ = np.histogram(lg, bins=40, range=(0, 11))
+                hist['size'] = counts.tolist()
+
+            # Sorting uses the precomputed ranks, never Python string compares.
+            if sel.size:
+                if sort == 'size':
+                    order = np.argsort(ix.size[sel], kind='stable')
+                elif sort == 'modified':
+                    order = np.argsort(ix.mtime[sel], kind='stable')
+                elif sort == 'path':
+                    order = np.lexsort((ix.rank[sel], ix.dirrank[ix.parent[sel]]))
+                else:
+                    order = np.argsort(ix.rank[sel], kind='stable')
+                if desc:
+                    order = order[::-1]
+                sel = sel[order]
+
+            total = int(sel.size)
+            page = sel[offset:offset + limit]
+            rows = []
+            for j in page.tolist():
+                rows.append({
+                    'name': ix.name(j),
+                    'dir': ix.dirs[ix.parent[j]],
+                    'size': int(ix.size[j]),
+                    'mtime': int(ix.mtime[j]),
+                    'cat': CATS[int(ix.cat[j])],
+                    'ext': ix.exts[int(ix.extv[j])],
+                })
+            return {
+                'total': total,
+                'rows': rows,
+                'cats': {CATS[i]: int(c) for i, c in enumerate(cat_counts)},
+                'hist': hist,
+                'ms': round((time.perf_counter() - t0) * 1000, 2),
+                'capped': bool(hits.size >= MAX_HITS),
+            }
+
+    # -- indexing ----------------------------------------------------------------
+    def reindex(self, roots):
+        threading.Thread(target=self._reindex, args=(roots,), daemon=True).start()
+
+    def _reindex(self, roots):
+        try:
+            self.state = 'scanning'
+            self.progress = 0
+            recs = None
+            # Phase 1: NTFS names in seconds. Needs elevation; quietly
+            # skipped when unavailable.
+            if IS_WIN:
+                letters = sorted({r[0].upper() for r in roots if len(r) > 1 and r[1] == ':'})
+                got = []
+                for L in letters:
+                    self.message = f'Reading NTFS records on {L}:'
+                    part = usn_records(L)
+                    if part:
+                        got.extend(part)
+                if got:
+                    recs = got
+                    ix = Index(); ix.roots = roots; ix.build(recs)
+                    with self.lock:
+                        self.ix = ix
+                    self.state = 'enriching'
+                    self.message = f'{ix.n:,} names ready — filling in size and date'
+
+            # Phase 2: the full walk, with sizes and dates.
+            self.message = self.message if recs else 'Walking the filesystem'
+            walked = scan_tree(roots, progress=self._tick)
+            ix = Index(); ix.roots = roots
+            ix.build(walked)
+            ix.enriched = True
+            with self.lock:
+                self.ix = ix
+            self.state = 'ready'
+            self.progress = ix.n
+            self.message = f'{ix.n:,} items indexed'
+            try:
+                self.start_watch(roots)
+            except Exception:
+                self.live = False
+            try:
+                ix.save(CACHE)
+            except Exception as e:
+                self.message += f'  (cache not written: {e})'
+        except Exception as e:
+            self.state = 'ready' if self.ix.n else 'empty'
+            self.message = f'Indexing failed: {e}'
+
+    def _tick(self, n):
+        self.progress = n
+        self.message = f'Walking the filesystem — {n:,} items'
+
+
+ENGINE = Engine()
+
+# -- visual search ------------------------------------------------------------
+# Image/video lookup ("find the original of this edited picture") lives in
+# visual.py. It pulls in Pillow, OpenCV and OpenVINO, so it is imported only
+# when first needed: a filename-only user never pays for it, and a missing
+# dependency becomes a message in the UI instead of a crash at startup.
+# _visual['dirty'] is set when the watcher sees a change under a folder the
+# visual index covers; _visual_loop turns that into a rescan.
+VISUAL_DIR = os.path.join(DATA_DIR, 'visual-index')
+_visual = {'mod': None, 'error': None, 'dirty': False}
+_visual_lock = threading.Lock()
+
+
+def visual():
+    with _visual_lock:
+        if _visual['mod'] is None and _visual['error'] is None:
+            try:
+                import visual as v
+                v.start(VISUAL_DIR, model_cache=os.path.join(DATA_DIR, 'model-cache'))
+                _visual['mod'] = v
+            except Exception as e:
+                _visual['error'] = (f'{e}. Visual search needs: pip install pillow opencv-python-headless openvino'
+                                    if isinstance(e, ImportError) else str(e))
+        return _visual['mod']
+
+
+def visual_touched(paths):
+    """Called with paths the watcher saw change; new or edited images in chosen folders get fingerprinted."""
+    v = _visual['mod']
+    if v and any(v.covers(p) for p in paths):
+        _visual['dirty'] = True
+
+
+def _visual_loop():
+    # Start the visual index at launch only if the user has used it before.
+    time.sleep(20)
+    if os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')):
+        visual()
+    last = time.time()
+    while True:
+        time.sleep(10)
+        v = _visual['mod']
+        # Rescan on watcher changes, or every half hour if some folder is not watched.
+        if v and (_visual['dirty'] or (time.time() - last > 1800 and v.has_unwatched())):
+            _visual['dirty'], last = False, time.time()
+            v.request_scan()
+
+
+# -- HTTP server --------------------------------------------------------------
+# Serves ui.html and a small JSON API on 127.0.0.1:PORT.
+
+def default_roots():
+    if IS_WIN:
+        out = []
+        for c in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
+            p = f'{c}:\\'
+            if os.path.isdir(p):
+                out.append(p)
+        return out or ['C:\\']
+    return [os.path.expanduser('~')]
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype='application/json; charset=utf-8'):
+        if isinstance(body, str):
+            body = body.encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _local(self):
+        """Only Riffle's own window may talk to this server. Without this, any web page could POST to
+127.0.0.1 (e.g. /api/act recycle) or read files through it via DNS rebinding."""
+        ok_hosts = (f'127.0.0.1:{PORT}', f'localhost:{PORT}')
+        origin = self.headers.get('Origin')
+        if self.headers.get('Host', '') in ok_hosts and (origin is None or origin in tuple('http://' + h for h in ok_hosts)):
+            return True
+        self._send(403, json.dumps({'error': 'forbidden'}))
+        return False
+
+    def do_GET(self):
+        if not self._local():
+            return
+        path = self.path.split('?')[0]
+        if path == '/api/visual/status':
+            if _visual['mod'] is None and not os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')):
+                # Never used yet: answer without loading the models.
+                home = os.path.expanduser('~')
+                sugg = [p for p in (os.path.join(home, d) for d in ('Pictures', 'Downloads', 'Desktop', 'Videos'))
+                        if os.path.isdir(p)]
+                return self._send(200, json.dumps({'available': True, 'fresh': True, 'images': 0, 'videos': 0,
+                                                   'folders': [], 'index': {'running': False}, 'suggested': sugg,
+                                                   'google_key': False}))
+            v = visual()
+            return self._send(200, json.dumps(v.status() if v else {'available': False, 'reason': _visual['error']}))
+        if path.startswith('/visual/thumb/'):
+            v = visual()
+            f = os.path.join(VISUAL_DIR, 'thumbs', f"{int(path.rsplit('/', 1)[1])}.jpg")
+            if not v or not os.path.exists(f):
+                return self._send(404, 'no thumbnail', 'text/plain')
+            with open(f, 'rb') as fh:
+                return self._send(200, fh.read(), 'image/jpeg')
+        if path == '/favicon.ico' and ICON:
+            with open(ICON, 'rb') as fh:
+                return self._send(200, fh.read(), 'image/x-icon')
+        if path in ('/', '/index.html'):
+            f = os.path.join(RES, 'ui.html')
+            if not os.path.exists(f):
+                return self._send(500, 'ui.html is missing — keep it next to riffle.py',
+                                  'text/plain; charset=utf-8')
+            with open(f, 'rb') as fh:
+                return self._send(200, fh.read(), 'text/html; charset=utf-8')
+        if path == '/api/status':
+            ix = ENGINE.ix
+            return self._send(200, json.dumps({
+                'state': ENGINE.state, 'message': ENGINE.message,
+                'progress': ENGINE.progress, 'count': ix.n - ix.ndead,
+                'gen': ix.gen, 'live': ENGINE.live,
+                'watch': ENGINE.watcher.alive_mode if ENGINE.watcher else 'none',
+                'liveAdds': ENGINE.live_adds, 'liveDels': ENGINE.live_dels,
+                'lastChange': ENGINE.last_change,
+                'enriched': ix.enriched, 'roots': ix.roots or default_roots(),
+                'builtAt': ix.built_at, 'drives': default_roots(),
+                'platform': 'windows' if IS_WIN else sys.platform,
+            }))
+        return self._send(404, 'not found', 'text/plain')
+
+    def do_POST(self):
+        if not self._local():
+            return
+        n = int(self.headers.get('Content-Length', 0))
+        path = self.path.split('?')[0]
+
+        if path == '/api/visual/search':          # raw image/video bytes, not JSON
+            if not n or n > 1 << 30:
+                return self._send(400, json.dumps({'error': 'Send one image or video under 1 GB.'}))
+            data = self.rfile.read(n)
+            v = visual()
+            if not v:
+                return self._send(503, json.dumps({'error': _visual['error'] or 'Visual search is starting'}))
+            try:
+                results, qimg = v.search_bytes(data, self.headers.get('Content-Type', ''))
+            except Exception as e:
+                return self._send(422, json.dumps({'error': f"Couldn't read that file: {e}"}))
+            q = None
+            if qimg is not None:
+                w, h = qimg.info.get('true_size', qimg.size)
+                q = {'w': w, 'h': h}
+            return self._send(200, json.dumps({'query': q, 'results': [v.public(r) for r in results]}))
+
+        try:
+            body = json.loads(self.rfile.read(n) or b'{}')
+        except Exception:
+            return self._send(400, json.dumps({'error': 'bad json'}))
+
+        if path.startswith('/api/visual/'):
+            v = visual()
+            if not v:
+                return self._send(503, json.dumps({'error': _visual['error'] or 'Visual search is starting'}))
+            if path == '/api/visual/folder':
+                targets = v.suggested_folders() if body.get('suggested') else [v.pick_folder() if body.get('pick') else body.get('path', '')]
+                for t in targets:
+                    try:
+                        v.add_folder(t)
+                    except v.SourceError as e:
+                        return self._send(400, json.dumps({'error': str(e), 'need_key': e.need_key}))
+            elif path == '/api/visual/key':
+                try:
+                    v.set_google_key(body.get('key', ''))
+                except v.SourceError as e:
+                    return self._send(400, json.dumps({'error': str(e)}))
+            elif path == '/api/visual/openlink':
+                # Only Google links: the page must not be able to open arbitrary URLs.
+                url = body.get('url', '')
+                if not url.startswith(('https://drive.google.com/', 'https://console.cloud.google.com/')):
+                    return self._send(400, json.dumps({'error': 'not a Google Drive link'}))
+                webbrowser.open(url)
+            elif path == '/api/visual/folder/remove':
+                v.remove_folder(body.get('path', ''))
+            elif path == '/api/visual/rescan':
+                v.request_scan()
+            else:
+                return self._send(404, json.dumps({'error': 'not found'}))
+            return self._send(200, json.dumps(v.status()))
+
+        if path == '/api/search':
+            try:
+                r = ENGINE.query(
+                    body.get('q', ''), body.get('mode', 'substring'),
+                    body.get('filters', {}) or {}, body.get('sort', 'name'),
+                    bool(body.get('desc')), int(body.get('offset', 0)),
+                    min(500, int(body.get('limit', 200))))
+                return self._send(200, json.dumps(r))
+            except Exception as e:
+                return self._send(200, json.dumps({'error': str(e), 'total': 0, 'rows': []}))
+
+        if path == '/api/reindex':
+            roots = body.get('roots') or default_roots()
+            ENGINE.reindex(roots)
+            return self._send(200, json.dumps({'ok': True}))
+
+        if path == '/api/act':
+            return self._send(200, json.dumps(shell_act(body.get('action', ''),
+                                                        body.get('paths') or [])))
+
+        return self._send(404, json.dumps({'error': 'not found'}))
+
+
+# -- file actions -------------------------------------------------------------
+# Open, reveal, copy, rename, recycle: all run here, never in the page.
+
+def shell_act(action, paths):
+    """Run a file action. Everything the context menu offers routes through here
+so the browser never needs shell privileges of its own."""
+    paths = [p for p in paths if p]
+    if not paths:
+        return {'ok': False, 'error': 'nothing selected'}
+    live = [p for p in paths if os.path.lexists(p)]
+    if not live and action != 'copy':
+        return {'ok': False, 'error': 'that path is no longer there'}
+    try:
+        if action == 'open':
+            for p in live[:12]:
+                if IS_WIN:
+                    os.startfile(p)
+                elif sys.platform == 'darwin':
+                    subprocess.Popen(['open', p])
+                else:
+                    subprocess.Popen(['xdg-open', p])
+
+        elif action == 'reveal':
+            for p in live[:8]:
+                if IS_WIN:
+                    subprocess.Popen(['explorer', '/select,', os.path.normpath(p)])
+                elif sys.platform == 'darwin':
+                    subprocess.Popen(['open', '-R', p])
+                else:
+                    subprocess.Popen(['xdg-open', os.path.dirname(p)])
+
+        elif action == 'openfolder':
+            seen = set()
+            for p in live[:8]:
+                d = p if os.path.isdir(p) else os.path.dirname(p)
+                if d in seen:
+                    continue
+                seen.add(d)
+                if IS_WIN:
+                    os.startfile(d)
+                elif sys.platform == 'darwin':
+                    subprocess.Popen(['open', d])
+                else:
+                    subprocess.Popen(['xdg-open', d])
+
+        elif action == 'openwith':
+            if not IS_WIN:
+                return {'ok': False, 'error': 'Windows only'}
+            subprocess.Popen(['rundll32.exe', 'shell32.dll,OpenAs_RunDLL',
+                              os.path.normpath(live[0])])
+
+        elif action == 'properties':
+            if not IS_WIN:
+                return {'ok': False, 'error': 'Windows only'}
+            p = os.path.normpath(live[0])
+            ps = ("$s=New-Object -ComObject Shell.Application;$f=$s.Namespace('"
+                  f"{os.path.dirname(p)}');$i=$f.ParseName('"
+                  f"{os.path.basename(p)}');$i.InvokeVerb('Properties')")
+            subprocess.Popen(['powershell', '-NoProfile', '-WindowStyle', 'Hidden',
+                              '-Command', ps])
+
+        elif action == 'recycle':
+            return recycle(live)
+
+        else:       # 'copy' is done by the page itself (clipboard)
+            return {'ok': False, 'error': 'unknown action'}
+        return {'ok': True, 'count': len(live)}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def recycle(paths):
+    """Send to the Recycle Bin (never a hard delete)."""
+    if IS_WIN:
+        try:
+            from ctypes import wintypes
+            shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [('hwnd', wintypes.HWND), ('wFunc', wintypes.UINT),
+                            ('pFrom', wintypes.LPCWSTR), ('pTo', wintypes.LPCWSTR),
+                            ('fFlags', ctypes.c_uint16), ('fAnyOperationsAborted', wintypes.BOOL),
+                            ('hNameMappings', ctypes.c_void_p), ('lpszProgressTitle', wintypes.LPCWSTR)]
+
+            FO_DELETE = 3
+            FOF_ALLOWUNDO = 0x40
+            FOF_NOCONFIRMATION = 0x10
+            FOF_SILENT = 0x4
+            buf = '\x00'.join(os.path.normpath(p) for p in paths) + '\x00\x00'   # double-NUL list
+            op = SHFILEOPSTRUCTW(None, FO_DELETE, buf, None,
+                                 FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT, False, None, None)
+            rc = shell32.SHFileOperationW(ctypes.byref(op))
+            if rc != 0:
+                return {'ok': False, 'error': f'shell refused (code {rc})'}
+            return {'ok': True, 'count': len(paths)}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+    try:
+        import send2trash
+        for p in paths:
+            send2trash.send2trash(p)
+        return {'ok': True, 'count': len(paths)}
+    except Exception:
+        return {'ok': False, 'error': 'recycle needs Windows, or `pip install send2trash`'}
+
+
+# -- app window -----------------------------------------------------------------
+# A chromeless browser window, branded as Riffle on the taskbar.
+
+APP_TITLE = 'Riffle'
+
+def find_browser():
+    """A Chromium browser lets us open a real app window with no browser chrome."""
+    cands = []
+    if IS_WIN:
+        pf = [os.environ.get('PROGRAMFILES', 'C:\\Program Files'),
+              os.environ.get('PROGRAMFILES(X86)', 'C:\\Program Files (x86)'),
+              os.environ.get('LOCALAPPDATA', '')]
+        for b in pf:
+            if not b:
+                continue
+            # Edge first: it ships with Windows, so it is almost always there.
+            cands += [os.path.join(b, 'Microsoft\\Edge\\Application\\msedge.exe'),
+                      os.path.join(b, 'Google\\Chrome\\Application\\chrome.exe'),
+                      os.path.join(b, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe')]
+    elif sys.platform == 'darwin':
+        cands = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                 '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+    else:
+        from shutil import which
+        cands = [which(x) for x in ('google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge')]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def open_window(url):
+    """Chromeless app window if we can, ordinary tab if not."""
+    b = find_browser()
+    if b:
+        profile = os.path.join(DATA_DIR, 'window')     # own profile: own window, own icon
+        try:
+            subprocess.Popen([b, f'--app={url}', f'--user-data-dir={profile}',
+                              '--no-first-run', '--no-default-browser-check',
+                              '--window-size=1180,760'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            threading.Thread(target=brand_window, daemon=True).start()
+            return True
+        except Exception:
+            pass
+    try:
+        webbrowser.open(url)
+        return True
+    except Exception:
+        return False
+
+
+def _find_window():
+    """The Riffle app window (a Chromium window titled "Riffle..."), or None."""
+    u32 = ctypes.WinDLL('user32', use_last_error=True)
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def enum_proc(hwnd, _):
+        title, cls = ctypes.create_unicode_buffer(64), ctypes.create_unicode_buffer(64)
+        u32.GetWindowTextW(hwnd, title, 64)
+        u32.GetClassNameW(hwnd, cls, 64)
+        if title.value.startswith(APP_TITLE) and cls.value == 'Chrome_WidgetWin_1' and u32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+            return False                # stop enumerating
+        return True
+    u32.EnumWindows(enum_proc, None)
+    return found[0] if found else None
+
+
+def brand_window():
+    """Make the app window Riffle's own taskbar button.
+
+Left alone, Windows files the window under Edge (Edge's icon, grouped with Edge, and pinning it pins Edge).
+Setting the window's AppUserModel properties gives it Riffle's ID, icon and relaunch command instead."""
+    if not IS_WIN:
+        return
+    import uuid
+
+    class GUID(ctypes.Structure):
+        _fields_ = [('b', ctypes.c_ubyte * 16)]
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [('fmtid', GUID), ('pid', ctypes.c_ulong)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [('vt', ctypes.c_ushort), ('pad', ctypes.c_ushort * 3), ('p', ctypes.c_void_p), ('p2', ctypes.c_void_p)]
+
+    def guid(s):
+        g = GUID(); ctypes.memmove(g.b, uuid.UUID(s).bytes_le, 16); return g
+
+    if getattr(sys, 'frozen', False):
+        cmd, icon = f'"{sys.executable}"', f'{sys.executable},0'
+    else:
+        exe = sys.executable.replace('python.exe', 'pythonw.exe')
+        cmd, icon = f'"{exe}" "{os.path.abspath(__file__)}"', ICON or ''
+    aum = guid('{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}')   # PKEY_AppUserModel_* format id
+    # pids: 2 RelaunchCommand, 3 RelaunchIconResource, 4 RelaunchDisplayNameResource, 5 ID
+    props = [(pid, ctypes.create_unicode_buffer(t)) for pid, t in ((2, cmd), (3, icon), (4, APP_TITLE), (5, APP_ID)) if t]
+    iid = guid('{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}')   # IID_IPropertyStore
+    ctypes.windll.ole32.CoInitialize(None)
+    # The browser takes a moment to open its window; keep re-applying for ~20 s
+    # since Chromium may recreate the window while it starts up.
+    for _ in range(40):
+        time.sleep(0.5)
+        hwnd = _find_window()
+        if not hwnd:
+            continue
+        try:
+            store = ctypes.c_void_p()
+            if ctypes.windll.shell32.SHGetPropertyStoreForWindow(ctypes.c_void_p(hwnd), ctypes.byref(iid), ctypes.byref(store)):
+                continue
+            vtbl = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                                           ctypes.POINTER(PROPVARIANT))(vtbl[6])        # IPropertyStore::SetValue
+            for pid, buf in props:
+                pv = PROPVARIANT(vt=31, p=ctypes.cast(buf, ctypes.c_void_p))      # VT_LPWSTR
+                set_value(store, ctypes.byref(PROPERTYKEY(aum, pid)), ctypes.byref(pv))
+            ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])(store)     # Commit
+            ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])(store)    # Release
+        except Exception as e:
+            print(f'taskbar icon: {e}', file=sys.stderr)
+            return
+
+
+def focus_window():
+    """Raise an existing Riffle window. Returns True if one was found."""
+    if not IS_WIN:
+        return False
+    try:
+        h = _find_window()
+        if not h:
+            return False
+        u32 = ctypes.WinDLL('user32', use_last_error=True)
+        u32.ShowWindow(ctypes.c_void_p(h), 9)          # SW_RESTORE
+        u32.SetForegroundWindow(ctypes.c_void_p(h))
+        return True
+    except Exception:
+        return False
+
+
+def hotkey_loop(url):
+    """Register Ctrl+Shift+Space system-wide and pump the message queue.
+
+Doing this in-process means no AutoHotkey dependency: the tool is summonable
+from anywhere the moment it is running.
+"""
+    if not IS_WIN:
+        return
+    try:
+        u32 = ctypes.WinDLL('user32', use_last_error=True)
+        MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x2, 0x4, 0x4000
+        VK_SPACE = 0x20
+        if not u32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE):
+            print('[riffle] hotkey Ctrl+Shift+Space is taken by something else')
+            return
+        print('[riffle] hotkey ready — Ctrl+Shift+Space')
+
+        class MSG(ctypes.Structure):
+            _fields_ = [('hwnd', ctypes.c_void_p), ('message', ctypes.c_uint),
+                        ('wParam', ctypes.c_void_p), ('lParam', ctypes.c_void_p),
+                        ('time', ctypes.c_uint),
+                        ('pt_x', ctypes.c_long), ('pt_y', ctypes.c_long)]
+
+        msg = MSG()
+        while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            if msg.message == 0x0312:                   # WM_HOTKEY
+                if not focus_window():
+                    open_window(url)
+    except Exception:
+        return
+
+
+def already_running():
+    """A second launch should raise the existing window, not start a rival server."""
+    import socket
+    s = socket.socket()
+    try:
+        s.connect(('127.0.0.1', PORT))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def main():
+    if already_running():
+        url = f'http://127.0.0.1:{PORT}'
+        if not focus_window():
+            open_window(url)
+        print('[riffle] already running — raised the existing window')
+        return
+
+    if os.path.exists(CACHE):
+        try:
+            ENGINE.ix = Index.load(CACHE)
+            ENGINE.state = 'ready'
+            ENGINE.message = f'{ENGINE.ix.n:,} items from cache'
+            print(f'[riffle] loaded {ENGINE.ix.n:,} items from cache')
+        except Exception as e:
+            print(f'[riffle] cache unusable ({e}), starting fresh')
+
+    srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
+    url = f'http://127.0.0.1:{PORT}'
+    print(f'[riffle] {url}')
+
+    if ENGINE.ix.n == 0:
+        roots = default_roots()
+        print(f"[riffle] first run — indexing {', '.join(roots)}")
+        ENGINE.reindex(roots)
+    else:
+        try:
+            ENGINE.start_watch(ENGINE.ix.roots or default_roots())
+        except Exception:
+            ENGINE.live = False
+
+    if '--no-window' not in sys.argv:
+        open_window(url)
+    threading.Thread(target=hotkey_loop, args=(url,), daemon=True).start()
+    threading.Thread(target=_visual_loop, daemon=True).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print('\n[riffle] bye')
+
+
+if __name__ == '__main__':
+    main()
