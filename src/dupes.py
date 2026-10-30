@@ -46,6 +46,11 @@ class HashCache:
         with self.lock:
             self.db.execute('INSERT OR REPLACE INTO h VALUES (?,?,?,?,?)', (path, size, mtime, part, full))
 
+    def clear(self):
+        with self.lock:
+            self.db.execute('DELETE FROM h')
+            self.db.commit()
+
     def commit(self):
         with self.lock:
             self.db.commit()

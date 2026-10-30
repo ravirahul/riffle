@@ -412,6 +412,24 @@ class Index:
         self.roots, self.enriched = roots, enriched
         self.gen += 1
 
+    def flag_mask(self, kind):
+        """Per-directory bool mask: 'system' (Windows, Program Files, AppData...) or
+        'hidden' (a dot-folder like .git or .cache anywhere in the path). Cached and
+        extended in place, since live updates only ever append directories."""
+        cache = self.__dict__.setdefault('_flag_cache', {})
+        arr, src = cache.get(kind, (None, None))
+        n = len(self.dirs)
+        if arr is None or src is not self.dirs or len(arr) > n:
+            arr, start = np.zeros(0, dtype=bool), 0
+        else:
+            start = len(arr)
+        if start < n:
+            test = {'system': _is_system_dir, 'hidden': _is_hidden_dir, 'root': lambda d: len(d) <= 3}[kind]
+            new = np.fromiter((test(d.lower()) for d in self.dirs[start:n]), dtype=bool, count=n - start)
+            arr = np.concatenate([arr, new])
+            cache[kind] = (arr, self.dirs)
+        return arr
+
     def scope_mask(self, prefix, contains=False):
         """Cached per-directory boolean mask for path scoping."""
         key = (prefix, contains)
@@ -474,6 +492,29 @@ class Index:
             ix.dead = np.asarray(dead, dtype=bool).copy()
             ix.ndead = int(ix.dead.sum())
         return ix
+
+
+# Folders hidden from results unless "Show system files" is on. Matched on the
+# part after the drive letter, so they apply to every drive.
+SYSTEM_TOP = ('\\windows', '\\program files', '\\program files (x86)', '\\programdata',
+              '\\$recycle.bin', '\\system volume information', '\\$windows.~bt', '\\$windows.~ws',
+              '\\$winreagent', '\\recovery', '\\perflogs', '\\msocache', '\\config.msi',
+              '\\intel', '\\amd', '\\nvidia', '\\drivers', '\\onedrivetemp', '\\$sysreset',
+              '\\windows.old', '\\esd')
+SYSTEM_ROOT_FILES = {'pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'dumpstack.log', 'dumpstack.log.tmp',
+                     'bootmgr', 'bootnxt', 'bootsect.bak', 'desktop.ini', 'thumbs.db', 'ntuser.dat'}
+
+
+def _is_system_dir(d):
+    rest = d[2:] if len(d) > 1 and d[1] == ':' else d
+    for t in SYSTEM_TOP:
+        if rest == t or rest.startswith(t + '\\'):
+            return True
+    return '\\appdata\\' in d or d.endswith('\\appdata') or '\\$recycle.bin' in d
+
+
+def _is_hidden_dir(d):
+    return '\\.' in d
 
 
 # -- scanning ---------------------------------------------------------------
@@ -1092,6 +1133,26 @@ class Engine:
         if exclude:
             m &= ~ix.scope_mask(exclude, contains=True)[ix.parent[idx]]
 
+        # Settings: hide system / hidden folders, and folders the user excluded.
+        if f.get('hideSystem'):
+            par = ix.parent[idx]
+            m &= ~ix.flag_mask('system')[par]
+            # the system folders and files sitting at a drive root themselves
+            roots = np.flatnonzero(m & ix.flag_mask('root')[par])
+            for k in roots.tolist():
+                j = int(idx[k])
+                nm = ix.name(j).lower()
+                if nm in SYSTEM_ROOT_FILES or _is_system_dir('\\' + nm):
+                    m[k] = False
+        if f.get('hideHidden'):
+            m &= ~ix.flag_mask('hidden')[ix.parent[idx]]
+            m &= ix.arr[ix.off[idx]] != 46          # names starting with '.' themselves
+        for d in f.get('excludeDirs') or []:
+            d = str(d).strip().lower().rstrip('\\/').replace('/', os.sep)
+            if d:
+                dm = ix.scope_mask(d)
+                m &= ~dm[ix.parent[idx]]
+
         return idx[m]
 
     # The one call the UI makes for every keystroke.
@@ -1117,6 +1178,18 @@ class Engine:
             # Category counts come from `base` (before the category/extension
             # facets), so the chips show what each choice would give.
             cat_counts = np.bincount(ix.cat[base], minlength=8).tolist() if base.size else [0] * 8
+
+            # Extension counts: everything but the extension filter applied.
+            ext_base = self._apply(hits, {k: v for k, v in filters.items() if k != 'exts'}) \
+                if filters.get('exts') else sel
+            ext_counts = []
+            if ext_base.size:
+                files = ext_base[ix.cat[ext_base] != CAT_DIR]
+                if files.size:
+                    bc = np.bincount(ix.extv[files], minlength=len(ix.exts))
+                    top = np.argsort(bc)[::-1][:60]
+                    ext_counts = [[ix.exts[int(i)], int(bc[i])] for i in top.tolist()
+                                  if bc[i] > 0 and ix.exts[int(i)]]
 
             # Histograms for the time and size sliders.
             hist = {'time': [], 'size': [], 'tmin': 0, 'tmax': 0}
@@ -1165,9 +1238,10 @@ class Engine:
                 'total': total,
                 'rows': rows,
                 'cats': {CATS[i]: int(c) for i, c in enumerate(cat_counts)},
+                'exts': ext_counts,
                 'hist': hist,
                 'ms': round((time.perf_counter() - t0) * 1000, 2),
-                'capped': bool(hits.size >= MAX_HITS),
+                'capped': bool(q and q.strip() and hits.size >= MAX_HITS),   # empty queries are never cut
             }
 
     # -- indexing ----------------------------------------------------------------
@@ -1700,8 +1774,41 @@ def focus_window():
         return False
 
 
+HOTKEY = {'combo': '', 'ok': False, 'tid': 0}
+
+VK_NAMES = {'space': 0x20, 'enter': 0x0D, 'tab': 0x09, '`': 0xC0, ';': 0xBA, '/': 0xBF, '.': 0xBE}
+
+
+def parse_hotkey(combo):
+    """'ctrl+shift+space' -> (modifiers, virtual key)."""
+    mods, vk = 0, None
+    for part in combo.lower().replace(' ', '').split('+'):
+        if part in ('ctrl', 'control'):
+            mods |= 0x2
+        elif part == 'shift':
+            mods |= 0x4
+        elif part == 'alt':
+            mods |= 0x1
+        elif part == 'win':
+            mods |= 0x8
+        elif part in VK_NAMES:
+            vk = VK_NAMES[part]
+        elif len(part) == 1 and part.isalnum():
+            vk = ord(part.upper())
+        elif part.startswith('f') and part[1:].isdigit() and 1 <= int(part[1:]) <= 12:
+            vk = 0x70 + int(part[1:]) - 1
+    return mods, vk
+
+
+def restart_hotkey(url):
+    """Stop the current hotkey thread (if any) and register the saved combo again."""
+    if HOTKEY['tid']:
+        ctypes.windll.user32.PostThreadMessageW(HOTKEY['tid'], 0x0012, 0, 0)   # WM_QUIT
+    threading.Thread(target=hotkey_loop, args=(url,), daemon=True).start()
+
+
 def hotkey_loop(url):
-    """Register Ctrl+Shift+Space system-wide and pump the message queue.
+    """Register the summon hotkey (Ctrl+Shift+Space by default) system-wide and pump the message queue.
 
 Doing this in-process means no AutoHotkey dependency: the tool is summonable
 from anywhere the moment it is running.
@@ -1710,12 +1817,15 @@ from anywhere the moment it is running.
         return
     try:
         u32 = ctypes.WinDLL('user32', use_last_error=True)
-        MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x2, 0x4, 0x4000
-        VK_SPACE = 0x20
-        if not u32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE):
-            print('[riffle] hotkey Ctrl+Shift+Space is taken by something else')
+        MOD_NOREPEAT = 0x4000
+        combo = features.settings().get('hotkey') or 'ctrl+shift+space'
+        mods, vk = parse_hotkey(combo)
+        HOTKEY.update(combo=combo, ok=False, tid=ctypes.windll.kernel32.GetCurrentThreadId())
+        if vk is None or not mods or not u32.RegisterHotKey(None, 1, mods | MOD_NOREPEAT, vk):
+            print(f'[riffle] hotkey {combo} is taken by something else')
             return
-        print('[riffle] hotkey ready — Ctrl+Shift+Space')
+        HOTKEY['ok'] = True
+        print(f'[riffle] hotkey ready — {combo}')
 
         class MSG(ctypes.Structure):
             _fields_ = [('hwnd', ctypes.c_void_p), ('message', ctypes.c_uint),
@@ -1728,6 +1838,7 @@ from anywhere the moment it is running.
             if msg.message == 0x0312:                   # WM_HOTKEY
                 if not focus_window():
                     open_window(url)
+        u32.UnregisterHotKey(None, 1)                   # WM_QUIT: settings changed the combo
     except Exception:
         return
 
@@ -1763,6 +1874,9 @@ def main():
 
     features.init(ENGINE, CAT_DIR, DATA_DIR, VERSION, GITHUB_REPO, RES)
     features._ctx['reset_visual'] = lambda: _visual.update(error=None)   # retry after the pack installs
+    features._ctx['restart_hotkey'] = lambda: restart_hotkey(f'http://127.0.0.1:{PORT}')
+    features._ctx['hotkey_state'] = HOTKEY
+    features._ctx['reindex'] = lambda roots: ENGINE.reindex(roots)
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     url = f'http://127.0.0.1:{PORT}'
     print(f'[riffle] {url}')

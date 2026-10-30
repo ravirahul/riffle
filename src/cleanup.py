@@ -128,9 +128,24 @@ def _is_cloud(path):
         return True
 
 # --- the report ----------------------------------------------------------------
-def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=()):
+def _days(n):
+    """90 -> '3 months', 14 -> '2 weeks', 1 -> '1 day'."""
+    if n % 365 == 0:
+        return f'{n // 365} year' + ('s' if n > 365 else '')
+    if n % 30 == 0 or n >= 60:
+        m = round(n / 30)
+        return f'{m} month' + ('s' if m > 1 else '')
+    if n % 7 == 0:
+        return f'{n // 7} week' + ('s' if n > 7 else '')
+    return f'{n} day' + ('s' if n > 1 else '')
+
+def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=(), opts=None):
     """records() yields (path, size, mtime) for indexed files. junk_dirs lists indexed
     folders named like DEV_JUNK; their contents aren't indexed, so they're measured here."""
+    opts = opts or {}
+    dl_days = opts.get('cleanDownloadsDays', 90)
+    inst_days = opts.get('cleanInstallerDays', 14)
+    big_bytes = opts.get('cleanBigMB', 500) * 2**20
     now = time.time()
     dl = _norm(DOWNLOADS)
     shots = _norm(os.path.join(HOME, 'Pictures', 'Screenshots'))
@@ -154,13 +169,13 @@ def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=())
         np = lp if lp.endswith('\\') else lp  # paths in index are files
         in_user = any(np.startswith(u) for u in USER_DIRS)
         if np.startswith(dl):
-            if ext in INSTALLER_EXT and age > 14 * DAY:
+            if ext in INSTALLER_EXT and age > inst_days * DAY:
                 installers.append((path, size, mtime))
-            elif age > 90 * DAY:
+            elif age > dl_days * DAY:
                 old_dl.append((path, size, mtime))
         elif np.startswith(shots) and age > 180 * DAY:
             screenshots.append((path, size, mtime))
-        if size >= 500 * 2**20 and age > 365 * DAY and name not in SYSTEM_FILES \
+        if size >= big_bytes and age > 365 * DAY and name not in SYSTEM_FILES \
                 and ext not in KEEP_EXT_BIG and '\\appdata\\' not in lp:
             big_old.append((path, size, mtime))
         if size == 0 and in_user and name not in EMPTY_OK and not name.endswith('.lock') \
@@ -221,14 +236,14 @@ def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=())
         _card('caches', 'Browser and app caches', 'Saved copies of web pages and app data. They '
               'rebuild themselves as you browse.', 'delete', caches,
               note='Deleted permanently. Close your browser first to clear the most.'),
-        _card('installers', 'Old installers', 'Setup files in Downloads older than 2 weeks. '
+        _card('installers', 'Old installers', f'Setup files in Downloads older than {_days(inst_days)}. '
               'Once installed, the app no longer needs them.', 'recycle', installers),
         _card('dev', 'Rebuildable project folders', 'node_modules, venv, caches and build '
               'output in projects untouched for 3 months.', 'delete', dev,
               note='Deleted permanently. Get them back with npm install, pip install or a rebuild.'),
-        _card('downloads', 'Old downloads', 'Files in Downloads you haven\'t changed in 3 months.',
+        _card('downloads', 'Old downloads', f'Files in Downloads you haven\'t changed in {_days(dl_days)}.',
               'recycle', old_dl, level='review'),
-        _card('big', 'Big, old files', 'Files over 500 MB not changed in a year.',
+        _card('big', 'Big, old files', f'Files over {opts.get("cleanBigMB", 500):,} MB not changed in a year.',
               'recycle', big_old, level='review'),
         _card('screenshots', 'Old screenshots', 'Screenshots older than 6 months.',
               'recycle', screenshots, level='review'),
@@ -316,7 +331,7 @@ class Cleaner:
         self.phase = ''
         self.lock = threading.Lock()
 
-    def scan(self, records, dupe_groups=(), junk_dirs=lambda: ()):
+    def scan(self, records, dupe_groups=(), junk_dirs=lambda: (), opts=None):
         with self.lock:
             if self.running:
                 return False
@@ -326,7 +341,7 @@ class Cleaner:
             background_priority(True)
             try:
                 rep = build_report(records, dupe_groups, progress=lambda s: setattr(self, 'phase', s),
-                                   junk_dirs=junk_dirs())
+                                   junk_dirs=junk_dirs(), opts=opts)
                 self.allowed = {os.path.normcase(i['path']): c['action']
                                 for c in rep['cards'] for i in c['items']}
                 self.report = rep

@@ -26,6 +26,8 @@ a = Analysis(
         (os.path.join(SRC, 'ui.html'), '.'),
         (os.path.join(SRC, 'ui-extra.css'), '.'),
         (os.path.join(SRC, 'ui-extra.js'), '.'),
+        (os.path.join(SRC, 'ui-settings.css'), '.'),
+        (os.path.join(SRC, 'ui-settings.js'), '.'),
         (os.path.join(SRC, 'riffle.ico'), '.'),
         (os.path.join(SRC, 'fonts'), 'fonts'),
     ],

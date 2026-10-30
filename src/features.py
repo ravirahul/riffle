@@ -41,6 +41,107 @@ def init(engine, cat_dir, data_dir, version, repo=None, res=None):
     _dupes = dupes.DupeScan(os.path.join(data_dir, 'hashes.db'))
     _cleaner = cleanup.Cleaner()
 
+# -- settings ------------------------------------------------------------------------
+DEFAULTS = {
+    'hideSystem': True,          # Windows, Program Files, AppData... out of results
+    'hideHidden': True,          # dot-folders and dot-files (.git, .cache, .gitignore)
+    'excludeDirs': [],           # folders never shown in results
+    'hotkey': 'ctrl+shift+space',
+    'animation': True,           # the summon riffle
+    'theme': 'system',           # system | light | dark
+    'previewOnStart': False,
+    'homeRecent': True,          # empty search shows recently changed files
+    'updates': True,             # daily check for a new version
+    'dupesMin': 1048576,
+    'cleanDownloadsDays': 90,
+    'cleanBigMB': 500,
+    'cleanInstallerDays': 14,
+}
+HOTKEYS = ['ctrl+shift+space', 'alt+space', 'ctrl+space', 'ctrl+alt+space', 'win+shift+f',
+           'ctrl+alt+f', 'ctrl+shift+f', 'ctrl+`', 'f8', 'f9']
+_settings = {}
+_settings_lock = threading.Lock()
+
+def _settings_path():
+    return os.path.join(_ctx.get('data_dir') or os.path.join(os.environ.get('LOCALAPPDATA', '.'), 'Riffle'),
+                        'settings.json')
+
+def settings():
+    with _settings_lock:
+        if not _settings:
+            _settings.update(DEFAULTS)
+            try:
+                with open(_settings_path(), encoding='utf-8') as f:
+                    saved = json.load(f)
+                _settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            except (OSError, ValueError):
+                pass
+        return dict(_settings)
+
+def _clean_setting(k, v):
+    """Validate one incoming value; raise ValueError if it doesn't fit."""
+    d = DEFAULTS[k]
+    if isinstance(d, bool):
+        return bool(v)
+    if isinstance(d, int):
+        v = int(v)
+        lo, hi = {'dupesMin': (0, 1 << 40), 'cleanDownloadsDays': (1, 3650), 'cleanBigMB': (10, 1 << 20),
+                  'cleanInstallerDays': (0, 3650)}[k]
+        return max(lo, min(hi, v))
+    if k == 'excludeDirs':
+        return [str(x).strip() for x in v if str(x).strip()][:200]
+    if k == 'hotkey':
+        v = str(v).lower().replace(' ', '')
+        if v not in HOTKEYS:
+            raise ValueError('unknown hotkey')
+        return v
+    allowed = {'theme': ('system', 'light', 'dark')}[k]
+    if v not in allowed:
+        raise ValueError(f'bad value for {k}')
+    return v
+
+def save_settings(patch):
+    before = settings()
+    clean = {}
+    for k, v in (patch or {}).items():
+        if k in DEFAULTS:
+            clean[k] = _clean_setting(k, v)
+    with _settings_lock:
+        _settings.update(clean)
+        tmp = _settings_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_settings, f, indent=1)
+        os.replace(tmp, _settings_path())
+        after = dict(_settings)
+    if after['hotkey'] != before['hotkey'] and _ctx.get('restart_hotkey'):
+        _ctx['restart_hotkey']()
+        time.sleep(0.3)                     # let the new registration report back
+    return after
+
+def settings_view():
+    """Everything the Settings dialog shows."""
+    eng = _ctx['engine']
+    ix = eng.ix
+    cache = os.path.join(_ctx['data_dir'], 'riffle-index.bin')
+    hk = _ctx.get('hotkey_state', {})
+    drives = [f'{c}:\\' for c in 'CDEFGHIJKLMNOPQRSTUVWXYZ' if os.path.isdir(f'{c}:\\')]
+    try:
+        auto = autostart()
+    except OSError:
+        auto = False
+    import sys
+    return {
+        'settings': settings(), 'hotkeys': HOTKEYS,
+        'hotkey': {'combo': hk.get('combo', ''), 'ok': hk.get('ok', False)},
+        'index': {'count': int(ix.n - ix.ndead), 'roots': ix.roots, 'drives': drives,
+                  'state': eng.state, 'message': eng.message,
+                  'savedAt': getattr(eng, 'saved_at', 0),
+                  'bytes': os.path.getsize(cache) if os.path.exists(cache) else 0},
+        'autostart': auto, 'canAutostart': bool(getattr(sys, 'frozen', False)),
+        'version': _ctx.get('version'), 'dataDir': _ctx['data_dir'],
+        'visualPack': 'installed' if not pack_needed() else _pack['state'],
+    }
+
 def inject(html: bytes) -> bytes:
     """Hand the page its token and version."""
     tag = (f'<meta name="riffle-token" content="{TOKEN}">'
@@ -185,6 +286,8 @@ def get(h, path):
         return _json(h, check_update())
     if path == '/api/autostart':
         return _json(h, {'on': autostart()})
+    if path == '/api/settings':
+        return _json(h, settings_view())
     if path == '/api/visual/status' and pack_needed():
         return _json(h, {'available': False, 'pack': dict(_pack), 'suggested': []})
     if path.startswith('/ui/'):
@@ -204,6 +307,7 @@ def get(h, path):
     return False
 
 STATIC = {'ui-extra.css': 'text/css; charset=utf-8', 'ui-extra.js': 'text/javascript; charset=utf-8',
+          'ui-settings.css': 'text/css; charset=utf-8', 'ui-settings.js': 'text/javascript; charset=utf-8',
           'fonts/fonts.css': 'text/css; charset=utf-8',
           'fonts/instrument-sans.woff2': 'font/woff2', 'fonts/dm-mono-300.woff2': 'font/woff2',
           'fonts/dm-mono-400.woff2': 'font/woff2', 'fonts/dm-mono-500.woff2': 'font/woff2'}
@@ -294,7 +398,7 @@ def post(h, path, body):
         return _json(h, {'freed': freed if done else 0, 'removed': len(ok) if done else 0,
                          'refused': len(body.get('paths', [])) - len(ok)})
     if path == '/api/cleanup/scan':
-        _cleaner.scan(records(0), _dupes.state['groups'], junk_dirs)
+        _cleaner.scan(records(0), _dupes.state['groups'], junk_dirs, settings())
         return _json(h, _cleaner.summary())
     if path == '/api/cleanup/items':
         return _json(h, {'items': _cleaner.items(body.get('key', ''))})
@@ -304,6 +408,23 @@ def post(h, path, body):
         return _json(h, _cleaner.remove(body.get('paths', [])))
     if path == '/api/autostart':
         return _json(h, {'on': autostart(bool(body.get('on')))})
+    if path == '/api/settings':
+        try:
+            save_settings(body.get('settings') or {})
+        except (ValueError, TypeError) as e:
+            return _json(h, {'error': str(e)}, 400)
+        if 'autostart' in body:
+            try:
+                autostart(bool(body['autostart']))
+            except OSError:
+                pass
+        if body.get('roots'):
+            roots = [r for r in body['roots'] if isinstance(r, str) and os.path.isdir(r)]
+            if roots and _ctx.get('reindex'):
+                _ctx['reindex'](roots)
+        if body.get('clearHashes'):
+            _dupes.cache.clear()
+        return _json(h, settings_view())
     if path == '/api/visual/install':
         pack_install()
         return _json(h, {'pack': dict(_pack)})
@@ -415,7 +536,7 @@ def _vtuple(v):
 def check_update(force=False):
     """Ask GitHub for the latest release, at most once a day."""
     repo = _ctx.get('repo')
-    if not repo:
+    if not repo or not settings().get('updates', True):
         return {'current': _ctx.get('version'), 'available': False}
     if force or time.time() - _update['checked'] > 86400:
         _update['checked'] = time.time()
