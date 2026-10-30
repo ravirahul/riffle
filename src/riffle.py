@@ -46,7 +46,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-VERSION = '1.0.1'
+import features
+
+VERSION = '1.1.0'
+GITHUB_REPO = os.environ.get('RIFFLE_REPO', 'ravirahul/riffle')  # update checks
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Frozen builds (PyInstaller) unpack bundled resources to sys._MEIPASS;
 # running from source they sit next to this file.
@@ -55,7 +58,7 @@ RES = getattr(sys, '_MEIPASS', HERE)
 ICON = next((f for f in (os.path.join(RES, 'riffle.ico'), os.path.join(HERE, 'packaging', 'riffle.ico'))
              if os.path.exists(f)), None)
 APP_ID = 'Bliink.Riffle'
-DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'Riffle')
+DATA_DIR = os.environ.get('RIFFLE_DATA') or os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'Riffle')
 os.makedirs(DATA_DIR, exist_ok=True)
 PORT = int(os.environ.get('RIFFLE_PORT', '8731'))
 CACHE = os.path.join(DATA_DIR, 'riffle-index.bin')
@@ -442,6 +445,7 @@ class Index:
                 'exts': self.exts, 'extv': self.extv, 'n': self.n,
                 'enriched': self.enriched, 'built_at': self.built_at, 'roots': self.roots,
                 'rank': self.rank, 'dirrank': self.dirrank, 'order': self.order,
+                'dead': self.dead,
             }, f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, path)
 
@@ -465,6 +469,10 @@ class Index:
         ix.dirrank = dr if dr is not None else np.zeros(0, dtype=np.int32)
         ix.arr = np.frombuffer(ix.blob, dtype=np.uint8)
         ix.finalize()
+        dead = d.get('dead')
+        if dead is not None and len(dead) == ix.n:
+            ix.dead = np.asarray(dead, dtype=bool).copy()
+            ix.ndead = int(ix.dead.sum())
         return ix
 
 
@@ -477,13 +485,37 @@ SKIP_FRAGMENTS = ('\\$recycle.bin', '\\system volume information', '\\appdata\\l
                   DATA_DIR.lower() + '\\')
 SKIP_DIRS = {'$windows.~bt', 'system volume information', '.git', 'node_modules_cache',
              '$recycle.bin', '$windows.~ws',
-             'visual-index'}
+             'visual-index',
+             # browser/app caches: thousands of writes a minute, nothing anyone searches for
+             'cache_data', 'code cache', 'gpucache', 'grshadercache', 'shadercache',
+             'dawncache', 'dawngraphitecache', 'dawnwebgpucache', 'crashpad',
+             # dependency and system stores: the folder is listed, its contents are not.
+             # Together they would triple the index (node_modules alone can be 400k files).
+             'node_modules', 'winsxs', '__pycache__', 'site-packages'}
+NOISE = tuple('\\' + d + '\\' for d in ('cache_data', 'code cache', 'gpucache', 'grshadercache',
+                                         'shadercache', 'dawncache', 'dawngraphitecache',
+                                         'dawnwebgpucache', 'crashpad', 'node_modules', 'winsxs',
+                                         '__pycache__', 'site-packages'))
 
 # Riffle's own data dir is skipped by path: its cache churns constantly.
 DATA_LOWER = DATA_DIR.lower()
 
 
-def scan_tree(roots, progress=None, skip_names=SKIP_DIRS):
+def _background_thread():
+    """Lower the calling thread's CPU and disk priority (Windows)."""
+    if IS_WIN:
+        k = ctypes.windll.kernel32
+        k.SetThreadPriority(k.GetCurrentThread(), 0x00010000)   # THREAD_MODE_BACKGROUND_BEGIN
+
+
+def _lowest_thread():
+    """Lowest normal CPU priority; disk stays normal so walks still finish quickly."""
+    if IS_WIN:
+        k = ctypes.windll.kernel32
+        k.SetThreadPriority(k.GetCurrentThread(), -2)   # THREAD_PRIORITY_LOWEST
+
+
+def scan_tree(roots, progress=None, skip_names=SKIP_DIRS, low=False):
     """Threaded os.scandir walk. On Windows DirEntry.stat() is free -- the values
 come back with the directory enumeration -- so this collects metadata at no
 extra syscall cost."""
@@ -515,7 +547,8 @@ extra syscall cost."""
                 progress(count[0])
         return subs
 
-    with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4) * 2)) as ex:   # breadth-first waves
+    workers = 4 if low else min(16, (os.cpu_count() or 4) * 2)
+    with ThreadPoolExecutor(max_workers=workers, initializer=_lowest_thread if low else None) as ex:   # breadth-first waves
         while pending:
             futs = [ex.submit(work, d) for d in pending]
             pending = []
@@ -707,7 +740,7 @@ costs one batched update rather than a thousand.
                 kind = actions.get(action)
                 if kind and rel:
                     full = os.path.join(root, rel)
-                    if not any(s in full.lower() for s in SKIP_FRAGMENTS):
+                    if not any(s in full.lower() for s in SKIP_FRAGMENTS + NOISE):
                         self.sink(kind, full)
                 if nxt == 0:
                     break
@@ -765,6 +798,10 @@ class Engine:
         self.live_adds = 0
         self.live_dels = 0
         self.last_change = 0.0
+        self.last_query = 0.0
+        self.saved_gen = 0
+        self.saved_at = 0.0
+        self.refreshing = False
         threading.Thread(target=self._drain_loop, daemon=True).start()
 
     # -- live index maintenance ------------------------------------------------
@@ -781,14 +818,69 @@ class Engine:
         self.live = True
 
     def _drain_loop(self):
+        # Every batch re-sorts the whole index, so batch rarely while nobody is
+        # searching. query() drains first, so results are always current.
         while True:
-            time.sleep(0.8)
+            time.sleep(0.8 if time.time() - self.last_query < 90 else 8)
             try:
                 self._drain()
+                self._maybe_save()
             except Exception:
                 continue
 
+    def _maybe_save(self):
+        """Write live changes to disk once things go quiet, at most every 10 minutes."""
+        ix = self.ix
+        if (self.state != 'ready' or self.refreshing or ix.gen == self.saved_gen
+                or time.time() - self.saved_at < 600 or time.time() - self.last_change < 20):
+            return
+        self.save_now()
+
+    def save_now(self):
+        _background_thread()
+        try:
+            with self.lock:
+                ix, gen = self.ix, self.ix.gen
+                ix.save(CACHE)
+            self.saved_gen, self.saved_at = gen, time.time()
+        except Exception as e:
+            print(f'[riffle] could not save index: {e}')
+        finally:
+            if IS_WIN:
+                k = ctypes.windll.kernel32
+                k.SetThreadPriority(k.GetCurrentThread(), 0x00020000)   # THREAD_MODE_BACKGROUND_END
+
+    def refresh(self, roots, delay=0):
+        """Catch up on changes made while Riffle wasn't running: walk again quietly,
+        keep serving the old index, then swap. Watcher events wait in the queue."""
+        def run():
+            time.sleep(delay)
+            if self.state != 'ready' or self.refreshing:
+                return
+            self.refreshing = True
+            _lowest_thread()
+            t0 = time.time()
+            print('[riffle] catching up on changes made while closed', flush=True)
+            try:
+                walked = scan_tree(roots, low=True)
+                print(f'[riffle] catch-up walk: {len(walked):,} items in {time.time() - t0:.0f}s', flush=True)
+                ix = Index(); ix.roots = roots
+                ix.build(walked)
+                ix.enriched = True
+                with self.lock:
+                    self.ix = ix
+                self.message = f'{ix.n:,} items indexed'
+            except Exception as e:
+                print(f'[riffle] refresh failed: {e}')
+            finally:
+                self.refreshing = False
+            self._drain()
+            self.save_now()
+        threading.Thread(target=run, daemon=True, name='refresh').start()
+
     def _drain(self):
+        if self.refreshing:
+            return                      # keep events queued until the new index is in place
         with self.pend_lock:
             if not self.pending:
                 return
@@ -1004,6 +1096,12 @@ class Engine:
 
     # The one call the UI makes for every keystroke.
     def query(self, q, mode, filters, sort, desc, offset, limit):
+        self.last_query = time.time()
+        if self.pending:
+            try:
+                self._drain()
+            except Exception:
+                pass
         with self.lock:
             ix = self.ix
             t0 = time.perf_counter()
@@ -1116,6 +1214,7 @@ class Engine:
                 self.live = False
             try:
                 ix.save(CACHE)
+                self.saved_gen, self.saved_at = ix.gen, time.time()
             except Exception as e:
                 self.message += f'  (cache not written: {e})'
         except Exception as e:
@@ -1220,6 +1319,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             return
         path = self.path.split('?')[0]
+        if features.get(self, path):
+            return
         if path == '/api/visual/status':
             if _visual['mod'] is None and not os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')):
                 # Never used yet: answer without loading the models.
@@ -1247,7 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, 'ui.html is missing — keep it next to riffle.py',
                                   'text/plain; charset=utf-8')
             with open(f, 'rb') as fh:
-                return self._send(200, fh.read(), 'text/html; charset=utf-8')
+                return self._send(200, features.inject(fh.read()), 'text/html; charset=utf-8')
         if path == '/api/status':
             ix = ENGINE.ix
             return self._send(200, json.dumps({
@@ -1290,6 +1391,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b'{}')
         except Exception:
             return self._send(400, json.dumps({'error': 'bad json'}))
+        if features.post(self, path, body):
+            return
 
         if path.startswith('/api/visual/'):
             v = visual()
@@ -1652,6 +1755,7 @@ def main():
         except Exception as e:
             print(f'[riffle] cache unusable ({e}), starting fresh')
 
+    features.init(ENGINE, CAT_DIR, DATA_DIR, VERSION, GITHUB_REPO, RES)
     srv = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     url = f'http://127.0.0.1:{PORT}'
     print(f'[riffle] {url}')
@@ -1665,6 +1769,10 @@ def main():
             ENGINE.start_watch(ENGINE.ix.roots or default_roots())
         except Exception:
             ENGINE.live = False
+        ENGINE.saved_gen, ENGINE.saved_at = ENGINE.ix.gen, os.path.getmtime(CACHE)
+        if time.time() - ENGINE.saved_at > 3600:
+            # Files may have changed while Riffle was off. Let boot settle first.
+            ENGINE.refresh(ENGINE.ix.roots or default_roots(), delay=0 if '--now' in sys.argv else 90)
 
     if '--no-window' not in sys.argv:
         open_window(url)

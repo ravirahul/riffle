@@ -54,8 +54,24 @@ DEV_JUNK = {
     '.mypy_cache': 'rebuilt by mypy', '.ruff_cache': 'rebuilt by ruff', '.turbo': 'rebuilt on build',
     '.svelte-kit': 'rebuilt on build', '.angular': 'rebuilt on build',
 }
-BROWSER_CACHE_PARTS = ('\\cache\\cache_data\\', '\\code cache\\', '\\gpucache\\',
-                       '\\service worker\\cachestorage\\', '\\shadercache\\', '\\grshadercache\\')
+# Cache folders inside each Chromium profile (Default, Profile 1...) and at the User Data root
+PROFILE_CACHES = (('Cache', 'Cache_Data'), ('Code Cache',), ('GPUCache',), ('DawnCache',),
+                  ('DawnGraphiteCache',), ('DawnWebGPUCache',), ('Service Worker', 'CacheStorage'))
+ROOT_CACHES = (('ShaderCache',), ('GrShaderCache',), ('GraphiteDawnCache',))
+
+def browser_cache_dirs():
+    for root in BROWSER_ROOTS:
+        if not os.path.isdir(root):
+            continue
+        yield from (os.path.join(root, *c) for c in ROOT_CACHES)
+        try:
+            profiles = [e.path for e in os.scandir(root) if e.is_dir() and
+                        (e.name == 'Default' or e.name.startswith('Profile '))]
+        except OSError:
+            continue
+        for prof in profiles:
+            yield from (os.path.join(prof, *c) for c in PROFILE_CACHES)
+
 BROWSER_ROOTS = [os.path.join(LOCAL, *p) for p in (
     ('Google', 'Chrome', 'User Data'), ('Microsoft', 'Edge', 'User Data'),
     ('BraveSoftware', 'Brave-Browser', 'User Data'), ('Vivaldi', 'User Data'),
@@ -112,28 +128,24 @@ def _is_cloud(path):
         return True
 
 # --- the report ----------------------------------------------------------------
-def build_report(records, dupe_groups=(), progress=lambda s: None):
-    """records() yields (path, size, mtime) for indexed files."""
+def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=()):
+    """records() yields (path, size, mtime) for indexed files. junk_dirs lists indexed
+    folders named like DEV_JUNK; their contents aren't indexed, so they're measured here."""
     now = time.time()
     dl = _norm(DOWNLOADS)
     shots = _norm(os.path.join(HOME, 'Pictures', 'Screenshots'))
     old_dl, installers, big_old, zero, screenshots = [], [], [], [], []
-    junk_roots = defaultdict(lambda: [0, 0])     # folder -> [bytes, files]
     junk_parent_latest = {}
+    # outermost junk folders only (a venv inside node_modules counts once)
+    junk_roots = []
+    for d in sorted(set(junk_dirs), key=len):
+        ld = d.lower() + '\\'
+        if not protected(d) and not any(ld.startswith(r.lower() + '\\') for r in junk_roots):
+            junk_roots.append(d)
 
     progress('Reading the index')
     for path, size, mtime in records():
         lp = path.lower()
-        # rebuildable dev folders (find the outermost junk folder in the path)
-        if '\\' in lp:
-            parts = lp.split('\\')
-            for i, part in enumerate(parts[:-1]):
-                if part in DEV_JUNK:
-                    root = '\\'.join(path.split('\\')[:i + 1])
-                    r = junk_roots[root]
-                    r[0] += size
-                    r[1] += 1
-                    break
         if protected(path):
             continue
         name = os.path.basename(lp)
@@ -174,19 +186,21 @@ def build_report(records, dupe_groups=(), progress=lambda s: None):
                     break
                 d = nd
     dev = []
-    for root, (size, n) in junk_roots.items():
+    progress('Measuring old project folders')
+    for root in junk_roots:
         parent = os.path.dirname(root).lower()
-        if protected(root) or now - junk_parent_latest.get(parent, now) < 90 * DAY:
+        if now - junk_parent_latest.get(parent, now) < 90 * DAY:
             continue
-        dev.append((root, size, junk_parent_latest.get(parent, 0)))
+        size = sum(s for _, s, _ in _walk_files(root))
+        if size:
+            dev.append((root, size, junk_parent_latest.get(parent, 0)))
 
     progress('Measuring temp files and caches')
     temp = [(p, s, m) for p, s, m in _walk_files(TEMP) if now - m > 2 * DAY]
     caches = []
-    for root in BROWSER_ROOTS:
+    for root in browser_cache_dirs():
         if os.path.isdir(root):
-            caches += [(p, s, m) for p, s, m in _walk_files(root)
-                       if any(c in p.lower() for c in BROWSER_CACHE_PARTS)]
+            caches += list(_walk_files(root))
     for root in APP_CACHE_DIRS:
         if os.path.isdir(root):
             caches += list(_walk_files(root))
@@ -302,7 +316,7 @@ class Cleaner:
         self.phase = ''
         self.lock = threading.Lock()
 
-    def scan(self, records, dupe_groups=()):
+    def scan(self, records, dupe_groups=(), junk_dirs=lambda: ()):
         with self.lock:
             if self.running:
                 return False
@@ -311,7 +325,8 @@ class Cleaner:
             from dupes import background_priority
             background_priority(True)
             try:
-                rep = build_report(records, dupe_groups, progress=lambda s: setattr(self, 'phase', s))
+                rep = build_report(records, dupe_groups, progress=lambda s: setattr(self, 'phase', s),
+                                   junk_dirs=junk_dirs())
                 self.allowed = {os.path.normcase(i['path']): c['action']
                                 for c in rep['cards'] for i in c['items']}
                 self.report = rep
