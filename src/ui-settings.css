@@ -129,3 +129,7 @@ html[data-theme="dark"] .upd{color:var(--ink)}
 .maker .links{margin-top:auto;align-items:baseline}
 .maker .links .hint{flex-basis:100%;margin-top:2px}
 @media(max-width:720px){.maker{grid-template-columns:1fr}}
+/* About: one Bliink card, the maker credited quietly in its corner */
+.mk-bliink{position:relative;margin:12px 0 6px;padding-bottom:30px}
+.mk-credit{position:absolute;right:14px;bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted);text-decoration:none}
+.mk-credit:hover{color:var(--ink);text-decoration:underline;text-underline-offset:2px}
