@@ -211,6 +211,12 @@ class Index:
             self._rebuild_dirrank()
         self._scope_cache = {}
 
+    def dirrank_now(self):
+        """Folder ranks for sorting by path; rebuilt only when that sort is used."""
+        if self.dirrank.size != len(self.dirs):
+            self._rebuild_dirrank()
+        return self.dirrank
+
     def _rebuild_dirrank(self):
         if not self.dirs:
             self.dirrank = np.zeros(0, dtype=np.int32)
@@ -350,11 +356,12 @@ class Index:
         self.dead = np.concatenate([self.dead, np.zeros(k, dtype=bool)])
         self.n = base + k
         new_ids = np.arange(base, base + k, dtype=np.int64)
-        self.order = np.concatenate([self.order, new_ids])
-        self.order = self.order[np.argsort(self.rank[self.order], kind='stable')]
+        # `order` is already sorted by rank: slot the new ids in (O(n) copy, no full sort)
+        new_ids = new_ids[np.argsort(self.rank[new_ids], kind='stable')]
+        at = np.searchsorted(self.rank[self.order], self.rank[new_ids], side='right')
+        self.order = np.insert(self.order, at, new_ids)
         if self.dirrank.size != len(self.dirs):
-            self._rebuild_dirrank()
-            self._scope_cache = {}
+            self._scope_cache = {}          # dirrank itself is rebuilt lazily, see dirrank_now()
         if need_renorm:
             self.renormalize_full()
         self.gen += 1
@@ -768,7 +775,7 @@ costs one batched update rather than a thousand.
         threads = []
         for root, h in handles:
             t = threading.Thread(target=self._watch_one, args=(k32, root, h, NOTIFY, ACTIONS),
-                                 daemon=True)
+                                 daemon=True, name=f'watch {root}')
             t.start()
             threads.append(t)
         while not self.stop_flag.is_set():
@@ -857,7 +864,7 @@ class Engine:
         self.saved_gen = 0
         self.saved_at = 0.0
         self.refreshing = False
-        threading.Thread(target=self._drain_loop, daemon=True).start()
+        threading.Thread(target=self._drain_loop, daemon=True, name="drain").start()
 
     # -- live index maintenance ------------------------------------------------
     def on_change(self, kind, path):
@@ -1278,7 +1285,10 @@ class Engine:
 
     # The one call the UI makes for every keystroke.
     def query(self, q, mode, filters, sort, desc, offset, limit):
-        self.last_query = time.time()
+        key = (q, mode, repr(sorted((filters or {}).items())), sort, desc)
+        if key != getattr(self, '_last_key', None):        # a page refresh repeats the same key
+            self._last_key = key
+            self.last_query = time.time()
         if self.pending:
             try:
                 self._drain()
@@ -1345,7 +1355,7 @@ class Engine:
                 elif sort == 'modified':
                     order = np.argsort(ix.mtime[sel], kind='stable')
                 elif sort == 'path':
-                    order = np.lexsort((ix.rank[sel], ix.dirrank[ix.parent[sel]]))
+                    order = np.lexsort((ix.rank[sel], ix.dirrank_now()[ix.parent[sel]]))
                 else:
                     order = np.argsort(ix.rank[sel], kind='stable')
                 if desc:
@@ -1469,8 +1479,9 @@ def visual_touched(paths):
 
 
 def _visual_loop():
-    # Start the visual index at launch only if the user has used it before.
-    time.sleep(20)
+    # Start the visual index at launch only if the user has used it before,
+    # and not during boot: its folder check can load the model.
+    time.sleep(180)
     if os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')):
         visual()
     last = time.time()
@@ -1540,6 +1551,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({'available': True, 'fresh': True, 'images': 0, 'videos': 0,
                                                    'folders': [], 'index': {'running': False}, 'suggested': sugg,
                                                    'google_key': False}))
+            if _visual['mod'] is None:
+                # Asleep: answer from the sqlite file. Only real use (a search, adding a
+                # folder, a rescan) or the deferred start in _visual_loop wakes it.
+                light = features.visual_status_light(VISUAL_DIR)
+                if light:
+                    return self._send(200, json.dumps(light))
             v = visual()
             return self._send(200, json.dumps(v.status() if v else {'available': False, 'reason': _visual['error']}))
         if path.startswith('/visual/thumb/'):
@@ -1922,6 +1939,41 @@ def _system_theme():
         return 'light'
 
 
+def _profile_threads(interval=5.0):
+    """RIFFLE_PROFILE=1: every few seconds print CPU ms per Python thread and the
+    busiest thread's current stack. Diagnostic only, off unless asked for."""
+    import traceback
+    k32 = ctypes.windll.kernel32
+    FT = ctypes.c_ulonglong
+
+    def cpu_ms(tid):
+        h = k32.OpenThread(0x0800, False, tid)          # THREAD_QUERY_LIMITED_INFORMATION
+        if not h:
+            return 0.0
+        c, e, kt, ut = FT(), FT(), FT(), FT()
+        k32.GetThreadTimes(h, ctypes.byref(c), ctypes.byref(e), ctypes.byref(kt), ctypes.byref(ut))
+        k32.CloseHandle(h)
+        return (kt.value + ut.value) / 10000.0
+    last = {}
+    while True:
+        time.sleep(interval)
+        rows = []
+        frames = sys._current_frames()
+        for t in threading.enumerate():
+            if not t.native_id:
+                continue
+            now = cpu_ms(t.native_id)
+            d = now - last.get(t.native_id, now)
+            last[t.native_id] = now
+            rows.append((d, t))
+        rows.sort(key=lambda r: -r[0])
+        print('[profile] ' + ', '.join(f'{t.name}={d:.0f}ms' for d, t in rows[:5]), flush=True)
+        if rows and rows[0][0] > 20 and rows[0][1].ident in frames:
+            st = traceback.extract_stack(frames[rows[0][1].ident])[-4:]
+            print('[profile]   ' + ' <- '.join(f'{os.path.basename(f.filename)}:{f.lineno} {f.name}'
+                                              for f in reversed(st)), flush=True)
+
+
 def start_quickbar(url):
     """Create the hidden quick bar (native Tk window) so the hotkey shows it instantly."""
     try:
@@ -1986,7 +2038,7 @@ def restart_hotkey(url):
     """Stop the current hotkey thread (if any) and register the saved combo again."""
     if HOTKEY['tid']:
         ctypes.windll.user32.PostThreadMessageW(HOTKEY['tid'], 0x0012, 0, 0)   # WM_QUIT
-    threading.Thread(target=hotkey_loop, args=(url,), daemon=True).start()
+    threading.Thread(target=hotkey_loop, args=(url,), daemon=True, name="hotkey").start()
 
 
 def hotkey_loop(url):
@@ -2085,10 +2137,12 @@ def main():
 
     if '--no-window' not in sys.argv:
         open_window(url)
+    if os.environ.get('RIFFLE_PROFILE') and IS_WIN:
+        threading.Thread(target=_profile_threads, daemon=True, name='profile').start()
     if IS_WIN and '--no-quickbar' not in sys.argv:
         start_quickbar(url)                     # before the hotkey, so the first press is instant
-    threading.Thread(target=hotkey_loop, args=(url,), daemon=True).start()
-    threading.Thread(target=_visual_loop, daemon=True).start()
+    threading.Thread(target=hotkey_loop, args=(url,), daemon=True, name="hotkey").start()
+    threading.Thread(target=_visual_loop, daemon=True, name="visual-loop").start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

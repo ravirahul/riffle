@@ -37,7 +37,7 @@ DATA = ROOT / "visual-index"
 THUMBS = DATA / "thumbs"
 MODELS = Path(getattr(sys, "_MEIPASS", ROOT)) / "models"
 MODEL_CACHE = MODELS / "cache"
-IDLE_UNLOAD = 600   # seconds without a search or scan before the model is dropped from memory
+IDLE_UNLOAD = 120                # seconds unused before the model is freed (reload ~1-2 s)
 ENGINE = os.environ.get("LENS_ENGINE", "auto")
 VIEWS = os.environ.get("LENS_VIEWS", "pool")
 

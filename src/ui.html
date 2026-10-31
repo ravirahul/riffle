@@ -1237,6 +1237,15 @@ function updateStat(){
     ? `${base} · ${state.marked.size.toLocaleString()} selected` : base;
 }
 let pollTimer = 0;
+async function refreshResults(){
+  state.stale = false;
+  const keepTop = $("#scroll").scrollTop;
+  await runSearch();
+  $("#scroll").scrollTop = keepTop;
+  render();
+}
+// back in the window: catch up at once
+window.addEventListener("focus", () => { if (state.stale) refreshResults(); clearTimeout(pollTimer); poll(); });
 async function poll(){
   clearTimeout(pollTimer);
   try{
@@ -1247,12 +1256,11 @@ async function poll(){
       dot.title = s.live ? "Watching for changes" : "Index is a snapshot";
       if (!state.ready){ state.ready = true; state.gen = s.gen; scheduleSearch(0); }
       else if (s.gen !== state.gen){
-        // the filesystem moved under us -- refresh quietly, keeping position
+        // the filesystem moved under us. Refresh quietly while someone is looking;
+        // in the background just remember it, and refresh when the window is used again.
         state.gen = s.gen;
-        const keepTop = $("#scroll").scrollTop;
-        await runSearch();
-        $("#scroll").scrollTop = keepTop;
-        render();
+        if (document.hasFocus() && !document.hidden) await refreshResults();
+        else state.stale = true;
       }
       if (!state.total && !state.q && !vis.on)
         $("#stat").textContent = `${s.count.toLocaleString()} items indexed`;
@@ -1264,7 +1272,8 @@ async function poll(){
       $("#live").textContent = "";
       if (s.count && !state.ready){ state.ready = true; scheduleSearch(0); }
     }
-    pollTimer = setTimeout(poll, s.state !== "ready" ? 700 : 1400);
+    const active = document.hasFocus() && !document.hidden;
+    pollTimer = setTimeout(poll, s.state !== "ready" ? 700 : active ? 1400 : 10000);
   }catch(err){
     $("#dot").className = "dot";
     $("#stat").textContent = "Lost the local server — is riffle.py still running?";
@@ -1448,7 +1457,7 @@ async function pollVisual(){
   try{
     const s = await fetch("/api/visual/status").then(r => r.json());
     vis.status = s; paintVisual(s);
-    vis.timer = setTimeout(pollVisual, s.index && s.index.running ? 1500 : 8000);
+    vis.timer = setTimeout(pollVisual, s.index && s.index.running ? 1500 : document.hasFocus() ? 8000 : 60000);
   }catch(err){ vis.timer = setTimeout(pollVisual, 8000); }
 }
 function paintVisual(s){

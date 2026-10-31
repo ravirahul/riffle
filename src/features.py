@@ -611,6 +611,43 @@ def _folder_map(dirs, ndirs, par, size, cat_slot, root):
         kids.append({**node(k1, a['v'], p1), 'kids': ch})
     return {'root': root, 'bytes': int(sum(k['bytes'] for k in kids)), 'kids': kids}
 
+_vlight = {}
+
+def visual_status_light(visual_dir):
+    """Visual-search status read straight from its sqlite file, without importing the
+    AI stack. Status checks must never wake the model or start a folder scan."""
+    import sqlite3
+    db = os.path.join(visual_dir, 'lens.db')
+    if not os.path.exists(db):
+        return None
+    stamp = tuple(os.path.getmtime(f) if os.path.exists(f) else 0 for f in (db, db + '-wal'))
+    if _vlight.get('stamp') == stamp:
+        return _vlight['data']                     # unchanged since the last check: no query
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+        try:
+            images, videos = con.execute(
+                "SELECT COUNT(DISTINCT CASE WHEN kind='image' THEN path END), "
+                "COUNT(DISTINCT CASE WHEN kind='video' THEN path END) FROM items").fetchone()
+            counts = dict(con.execute("SELECT src, COUNT(DISTINCT path) FROM items GROUP BY src").fetchall())
+            cols = [r[1] for r in con.execute("PRAGMA table_info(folders)").fetchall()]
+            rows = con.execute("SELECT path, label FROM folders ORDER BY path" if 'label' in cols
+                               else "SELECT path, '' FROM folders ORDER BY path").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    folders = [{'path': f, 'label': label or '', 'count': counts.get(f, 0), 'error': None,
+                'kind': 'drive' if f.startswith('https://drive.google.com') else 'local'} for f, label in rows]
+    home = os.path.expanduser('~')
+    sugg = [p for p in (os.path.join(home, d) for d in ('Pictures', 'Downloads', 'Desktop', 'Videos'))
+            if os.path.isdir(p) and p not in {x['path'] for x in folders}]
+    data = {'available': True, 'images': images, 'videos': videos, 'folders': folders,
+            'index': {'running': False}, 'engine': 'asleep (loads on next search)', 'verify': True,
+            'google_key': False, 'suggested': sugg, 'asleep': True}
+    _vlight.update(stamp=stamp, data=data)
+    return data
+
 # -- optional visual-search pack -----------------------------------------------------
 # The installer ships without OpenCV, OpenVINO, Pillow and the model (~270 MB).
 # They come as one zip attached to the GitHub release, fetched only when wanted.
