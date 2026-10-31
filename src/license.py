@@ -103,6 +103,27 @@ def _save():
 def install_id():
     return _state.get('iid', '')
 
+def install_source():
+    """Where this install came from ("producthunt", "store"...), recorded by the installer
+    from its download file name. "direct" when unknown or run from source."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Bliink\Riffle') as k:
+            src = str(winreg.QueryValueEx(k, 'Source')[0])
+    except OSError:
+        return 'direct'
+    src = ''.join(c for c in src.lower() if c.isalnum() or c == '-')[:24]
+    return src or 'direct'
+
+def first_ping_pending():
+    return not _state.get('firstPing')
+
+def mark_first_ping():
+    with _lock:
+        if not _state.get('firstPing'):
+            _state['firstPing'] = int(time.time())
+            _save()
+
 def _pc_id():
     """Stable per-PC id (hash of Windows' MachineGuid), so reinstalls reuse the same seat."""
     try:
@@ -153,7 +174,8 @@ def activate(key):
     if not p:
         return {'ok': False, 'error': ERRORS['invalid']}
     try:
-        r = _post('/api/activate.php', {'key': key, 'instance': _pc_id(), 'label': socket.gethostname()[:60]})
+        r = _post('/api/activate.php', {'key': key, 'instance': _pc_id(), 'label': socket.gethostname()[:60],
+                                        'iid': install_id(), 'src': install_source()})   # ties the sale to its source
     except OSError:
         return {'ok': False, 'error': "Couldn't reach riffle.bliink.in. Check the internet connection and try again."}
     if not r.get('ok'):

@@ -53,6 +53,8 @@ Name: "{userprograms}\Riffle"; Filename: "{app}\Riffle.exe"; AppUserModelID: "Bl
 Name: "{userdesktop}\Riffle"; Filename: "{app}\Riffle.exe"; AppUserModelID: "Bliink.Riffle"; Tasks: desktopicon
 
 [Registry]
+; holds the install source written in [Code]; removed on uninstall
+Root: HKCU; Subkey: "Software\Bliink\Riffle"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Riffle"; ValueData: """{app}\Riffle.exe"" --no-window"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
@@ -60,6 +62,48 @@ Filename: "{app}\Riffle.exe"; Description: "Open Riffle now"; Flags: nowait post
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM Riffle.exe /F"; Flags: runhidden; RunOnceId: "StopRiffle"
+
+[Code]
+{ Install source: downloads from riffle.bliink.in/dl?src=producthunt arrive named
+  Riffle-Setup-<ver>-producthunt.exe. Record "producthunt" once, on first install only,
+  so updates (plain file names) never overwrite where someone first came from. }
+function CleanSource(S: String): String;
+var I: Integer; C: Char;
+begin
+  Result := '';
+  S := Lowercase(S);
+  for I := 1 to Length(S) do begin
+    C := S[I];
+    if ((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '-') then
+      Result := Result + C;
+  end;
+  Result := Copy(Result, 1, 24);
+end;
+
+function SourceFromFileName(): String;
+var Name, Prefix: String; P: Integer;
+begin
+  Result := '';
+  Name := ExtractFileName(ExpandConstant('{srcexe}'));
+  if Lowercase(Copy(Name, Length(Name) - 3, 4)) = '.exe' then Name := Copy(Name, 1, Length(Name) - 4);
+  P := Pos(' (', Name);                       { browser copies: "...-producthunt (1)" }
+  if P > 0 then Name := Copy(Name, 1, P - 1);
+  Prefix := 'Riffle-Setup-{#AppVer}-';
+  if Lowercase(Copy(Name, 1, Length(Prefix))) = Lowercase(Prefix) then
+    Result := CleanSource(Copy(Name, Length(Prefix) + 1, 100));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var Src, Existing: String;
+begin
+  if CurStep = ssPostInstall then begin
+    if not RegQueryStringValue(HKCU, 'Software\Bliink\Riffle', 'Source', Existing) then begin
+      Src := SourceFromFileName();
+      if Src = '' then Src := 'direct';
+      RegWriteStringValue(HKCU, 'Software\Bliink\Riffle', 'Source', Src);
+    end;
+  end;
+end;
 
 [UninstallDelete]
 ; The index and settings live in %LOCALAPPDATA%\Riffle. Leave them on uninstall,

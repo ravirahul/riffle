@@ -116,7 +116,7 @@ footer a{color:var(--ink-2)}
     <div class="hero">
       <h1>Find any file. <span class="mk">Free the space.</span></h1>
       <p class="lede">Riffle searches every file on your Windows PC as you type, shows what's inside with one key, and tells you which duplicates and leftovers are safe to clear.</p>
-      <a class="cta" href="https://github.com/ravirahul/riffle/releases/latest">
+      <a class="cta dl" href="https://riffle.bliink.in/dl?src=site">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg>
         Download for Windows
       </a>
@@ -222,7 +222,7 @@ footer a{color:var(--ink-2)}
 
     <div class="final">
       <h2>Stop hunting for files.</h2>
-      <a class="cta" href="https://github.com/ravirahul/riffle/releases/latest">
+      <a class="cta dl" href="https://riffle.bliink.in/dl?src=site">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6 11l6 6 6-6M4 21h16"/></svg>
         Download Riffle
       </a>
@@ -236,5 +236,14 @@ footer a{color:var(--ink-2)}
     <a href="https://github.com/ravirahul/riffle/issues">Report a problem</a>
   </footer>
 </div>
+<script>
+// Download links carry where the visitor came from (?ref=producthunt or utm_source),
+// so the installer can tell Riffle its source. Nothing else is tracked on this page.
+(function(){
+  var q = new URLSearchParams(location.search);
+  var src = (q.get('ref') || q.get('utm_source') || q.get('src') || 'site').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'site';
+  document.querySelectorAll('a.dl').forEach(function(a){ a.href = 'https://riffle.bliink.in/dl?src=' + encodeURIComponent(src); });
+})();
+</script>
 </body>
 </html>

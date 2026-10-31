@@ -857,7 +857,8 @@ def _upkeep():
     time.sleep(240)
     while True:
         background_priority(True)
-        for job in (license.recheck_if_due, _snapshot, auto_clean):
+        # check_update runs here too, so installs that only use the quick bar still count
+        for job in (license.recheck_if_due, check_update, _snapshot, auto_clean):
             try:
                 job()
             except Exception as e:
@@ -874,13 +875,19 @@ def _update_from_riffle_server():
     (random install id, version and tier only). Returns True when it answered."""
     import license
     from urllib.parse import urlencode
-    qs = urlencode({'v': _ctx.get('version', ''), 'tier': license.status()['tier'], 'iid': license.install_id()})
+    params = {'v': _ctx.get('version', ''), 'tier': license.status()['tier'], 'iid': license.install_id(),
+              'src': license.install_source()}
+    first = license.first_ping_pending()
+    if first:
+        params['first'] = 1                      # counts as a new install, once
     try:
-        req = urllib.request.Request(f'{license.SERVER}/api/update.php?{qs}', headers={'User-Agent': 'Riffle'})
+        req = urllib.request.Request(f'{license.SERVER}/api/update.php?{urlencode(params)}', headers={'User-Agent': 'Riffle'})
         with urllib.request.urlopen(req, timeout=8) as r:
             u = json.load(r)
     except Exception:
         return False
+    if first:
+        license.mark_first_ping()
     if not u.get('latest'):
         return False
     _update.update(latest=str(u['latest']).lstrip('v'), url=u.get('url'), notes=(u.get('notes') or '')[:1200])
