@@ -28,7 +28,7 @@ RECHECK_DAYS = 14
 PREFIX = 'RIFFLE1'
 # Public key of the signing key on riffle.bliink.in: uncompressed point 04||X||Y, hex.
 # Filled in from riffle-license\PUBLIC-KEY.txt. Tests may override with RIFFLE_PUBKEY.
-PUBLIC_KEY_HEX = ''
+PUBLIC_KEY_HEX = '04f9437f0f9858e0ef0caf89dadf83ca7849f0746ce4583e4b0a506ac3bbacbbec0e4f624de0ccc32a9a69c355d7ff5b8b1d92d2257ef3056856311c9995e17746'
 
 _lock = threading.Lock()
 _state = {}
