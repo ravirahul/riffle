@@ -40,7 +40,9 @@ a{color:inherit}
 
   <h2>When Riffle uses the internet</h2>
   <ul>
-    <li>Once a day it asks GitHub whether a newer version exists. The request contains no information about you or your files.</li>
+    <li>Once a day it asks riffle.bliink.in whether a newer version exists. That check sends a random install ID (made on your PC, not linked to you), the Riffle version, whether you're on Free, Trial or Pro, and, once, which link you downloaded Riffle from (for example "producthunt"). We use this only to count installs. Your IP address is used to look up the country and is never stored. Turning off "Check for updates" in Settings sends nothing.</li>
+    <li>Downloads are counted per link and per day, without storing anything about you.</li>
+    <li>Activating Riffle Pro sends your key, your PC's name and the same random install ID.</li>
     <li>If you choose to add visual search, it downloads that component from GitHub.</li>
     <li>If you add a shared Google Drive folder to visual search, it reads that folder's previews from Google using the API key you provide.</li>
   </ul>
