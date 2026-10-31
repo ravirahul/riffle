@@ -1482,7 +1482,7 @@ def _visual_loop():
     # Start the visual index at launch only if the user has used it before,
     # and not during boot: its folder check can load the model.
     time.sleep(180)
-    if os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')):
+    if os.path.exists(os.path.join(VISUAL_DIR, 'lens.db')) and features.pro():
         visual()
     last = time.time()
     while True:
@@ -1596,6 +1596,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get('Content-Length', 0))
         path = self.path.split('?')[0]
+
+        if path.startswith('/api/visual/') and path != '/api/visual/openlink' and not features.pro():
+            if n:
+                self.rfile.read(n)                   # drain the body so the connection stays usable
+            return self._send(402, json.dumps({'error': 'pro', 'feature': 'visual'}))
 
         if path == '/api/visual/search':          # raw image/video bytes, not JSON
             if not n or n > 1 << 30:

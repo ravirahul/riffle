@@ -256,7 +256,8 @@ const dupes = {
       html += `<div class="dgroup" data-h="${g.hash}">
         <div class="gh"><div class="th" data-peek="${esc(first)}" title="Preview">${thumb}</div>
           <div class="gt"><b>${esc(name)}</b><span>${fmtSize(g.size)} × ${g.files.length} copies</span></div>
-          <div class="waste">${fmtSize(g.waste)} extra</div></div>
+          <div class="waste">${fmtSize(g.waste)} extra</div>
+          <button class="btn" data-gset="${g.hash}" title="Recycle the picked copies in this set">Recycle extras</button></div>
         ${g.files.map(f => `<div class="dfile">
           <input type="checkbox" data-pick="${esc(f.path)}" ${this.picked.has(f.path) ? "checked" : ""} aria-label="Recycle this copy">
           <span class="p" title="${esc(f.path)}"><bdi>${esc(f.path)}</bdi></span>

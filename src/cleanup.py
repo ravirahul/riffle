@@ -344,6 +344,8 @@ class Cleaner:
                                    junk_dirs=junk_dirs(), opts=opts)
                 self.allowed = {os.path.normcase(i['path']): c['action']
                                 for c in rep['cards'] for i in c['items']}
+                self.card_of = {os.path.normcase(i['path']): c['key']
+                                for c in rep['cards'] for i in c['items']}
                 self.report = rep
                 self.phase = 'Done'
             except Exception as e:

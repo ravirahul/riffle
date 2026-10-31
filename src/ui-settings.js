@@ -112,8 +112,9 @@ $(".main .head").insertAdjacentHTML("beforebegin", `<div class="homebar">${ICO.s
   <b>Recently changed</b><span>Your newest files. Start typing to search everything.</span><span class="kb">Ctrl K</span></div>`);
 
 /* ── settings dialog ───────────────────────────────────────── */
-const TABS = [["general", "General"], ["search", "Search"], ["index", "Index"], ["clean", "Duplicates & clean up"],
+const TABS = [["pro", "Riffle Pro"], ["general", "General"], ["search", "Search"], ["index", "Index"], ["clean", "Duplicates & clean up"],
               ["visual", "Visual search"], ["about", "About"]];
+ICO.pro = '<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/></svg>';
 document.body.insertAdjacentHTML("beforeend", `
 <div class="dlg set" id="set" role="dialog" aria-modal="true" aria-label="Settings">
   <div class="box">

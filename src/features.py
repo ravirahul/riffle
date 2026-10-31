@@ -40,6 +40,9 @@ def init(engine, cat_dir, data_dir, version, repo=None, res=None):
     import cleanup
     _dupes = dupes.DupeScan(os.path.join(data_dir, 'hashes.db'))
     _cleaner = cleanup.Cleaner()
+    import license
+    license.init(data_dir)
+    threading.Thread(target=_upkeep, daemon=True, name='upkeep').start()
 
 # -- settings ------------------------------------------------------------------------
 DEFAULTS = {
@@ -57,6 +60,9 @@ DEFAULTS = {
     'cleanDownloadsDays': 90,
     'cleanBigMB': 500,
     'cleanInstallerDays': 14,
+    'autoClean': False,          # Pro: monthly temp + cache clean-up
+    'autoCleanLast': 0,
+    'autoCleanFreed': 0,
 }
 HOTKEYS = ['ctrl+shift+space', 'alt+space', 'ctrl+space', 'ctrl+alt+space', 'win+shift+f',
            'ctrl+alt+f', 'ctrl+shift+f', 'ctrl+`', 'f8', 'f9']
@@ -87,7 +93,7 @@ def _clean_setting(k, v):
     if isinstance(d, int):
         v = int(v)
         lo, hi = {'dupesMin': (0, 1 << 40), 'cleanDownloadsDays': (1, 3650), 'cleanBigMB': (10, 1 << 20),
-                  'cleanInstallerDays': (0, 3650)}[k]
+                  'cleanInstallerDays': (0, 3650), 'autoCleanLast': (0, 1 << 40), 'autoCleanFreed': (0, 1 << 60)}[k]
         return max(lo, min(hi, v))
     if k == 'excludeDirs':
         return [str(x).strip() for x in v if str(x).strip()][:200]
@@ -289,6 +295,8 @@ def get(h, path):
         return _json(h, {'on': autostart()})
     if path == '/api/settings':
         return _json(h, settings_view())
+    if path == '/api/license':
+        return _json(h, license_view())
     if path == '/api/inbox':                       # a query handed over by the quick bar, once
         q, _ctx['inbox'] = _ctx.get('inbox'), None
         return _json(h, {'q': q})
@@ -313,6 +321,7 @@ def get(h, path):
 STATIC = {'ui-extra.css': 'text/css; charset=utf-8', 'ui-extra.js': 'text/javascript; charset=utf-8',
           'ui-settings.css': 'text/css; charset=utf-8', 'ui-settings.js': 'text/javascript; charset=utf-8',
           'ui-insights.css': 'text/css; charset=utf-8', 'ui-insights.js': 'text/javascript; charset=utf-8',
+          'ui-pro.css': 'text/css; charset=utf-8', 'ui-pro.js': 'text/javascript; charset=utf-8',
           'fonts/fonts.css': 'text/css; charset=utf-8',
           'fonts/instrument-sans.woff2': 'font/woff2', 'fonts/dm-mono-300.woff2': 'font/woff2',
           'fonts/dm-mono-400.woff2': 'font/woff2', 'fonts/dm-mono-500.woff2': 'font/woff2'}
@@ -383,6 +392,10 @@ def post(h, path, body):
     if path == '/api/dupes/remove':
         # Only files from the latest scan, and never the last copy of a set.
         groups = {f['path'].lower(): g for g in _dupes.state['groups'] for f in g['files']}
+        if not pro():
+            sets = {id(groups[p.lower()]) for p in body.get('paths', []) if p.lower() in groups}
+            if len(sets) > 1:
+                return _json(h, {'error': 'pro', 'feature': 'dupes-bulk'}, 402)
         want = {p.lower() for p in body.get('paths', [])}
         ok = []
         for p in body.get('paths', []):
@@ -410,7 +423,21 @@ def post(h, path, body):
     if path == '/api/cleanup/remove':
         if body.get('emptyBin'):
             return _json(h, _cleaner.empty_bin())
+        if not pro():
+            card_of = getattr(_cleaner, 'card_of', {})
+            if any(card_of.get(os.path.normcase(p)) not in FREE_CARDS for p in body.get('paths', [])):
+                return _json(h, {'error': 'pro', 'feature': 'clean-all'}, 402)
         return _json(h, _cleaner.remove(body.get('paths', [])))
+    if path == '/api/license/activate':
+        import license
+        return _json(h, license.activate(str(body.get('key', ''))))
+    if path == '/api/license/deactivate':
+        import license
+        return _json(h, license.deactivate())
+    if path == '/api/license/buy':
+        import license, webbrowser
+        webbrowser.open(license.BUY_URL)
+        return _json(h, {'ok': True})
     if path == '/api/autostart':
         return _json(h, {'on': autostart(bool(body.get('on')))})
     if path == '/api/settings':
@@ -440,7 +467,18 @@ def post(h, path, body):
             webbrowser.open(u['url'])
         return _json(h, {'ok': True})
     if path == '/api/insights':
-        return _json(h, insights(bool(body.get('all')), body.get('root') or None))
+        d = insights(bool(body.get('all')), body.get('root') or None)
+        rows = history()
+        return _json(h, {**d, 'history': rows if pro() else [], 'historyLocked': not pro(), 'historyDays': len(rows)})
+    if path == '/api/autoclean':
+        if not pro():
+            return _json(h, {'error': 'pro', 'feature': 'auto'}, 402)
+        if 'on' in body:
+            save_settings({'autoClean': bool(body['on'])})
+        if body.get('now'):
+            freed = auto_clean(force=True)
+            return _json(h, {**_auto_state(), 'freedNow': freed or 0})
+        return _json(h, _auto_state())
     if path == '/api/spacemap':
         import cleanup
         root = body.get('root') or 'C:\\'
@@ -642,7 +680,7 @@ def visual_status_light(visual_dir):
     home = os.path.expanduser('~')
     sugg = [p for p in (os.path.join(home, d) for d in ('Pictures', 'Downloads', 'Desktop', 'Videos'))
             if os.path.isdir(p) and p not in {x['path'] for x in folders}]
-    data = {'available': True, 'images': images, 'videos': videos, 'folders': folders,
+    data = {'available': True, 'pro': pro(), 'images': images, 'videos': videos, 'folders': folders,
             'index': {'running': False}, 'engine': 'asleep (loads on next search)', 'verify': True,
             'google_key': False, 'suggested': sugg, 'asleep': True}
     _vlight.update(stamp=stamp, data=data)
@@ -737,18 +775,126 @@ def pack_install():
                 pass
     threading.Thread(target=run, daemon=True, name='visual-pack').start()
 
+# -- Riffle Pro --------------------------------------------------------------------
+# Free: search, quick bar, preview, Insights, every scan, removing duplicates one set
+# at a time, clearing temp files, caches and the Recycle Bin.
+# Pro (or the 14-day trial): visual search, bulk duplicate removal, every clean-up
+# card, monthly automatic clean-up, disk growth history in Insights.
+FREE_CARDS = {'temp', 'caches', 'bin'}
+PRO_FEATURES = [
+    ('visual', 'Visual search', 'Find the original of any photo or video, even after crops and filters.'),
+    ('dupes', 'One-click duplicate removal', 'Recycle every extra copy at once, across all sets.'),
+    ('clean', 'Clean all', 'Clear old installers, downloads, big files and project folders in one go.'),
+    ('auto', 'Monthly automatic clean-up', 'Temp files and caches cleared for you once a month.'),
+    ('history', 'Disk growth history', 'See how your space changes week by week in Insights.'),
+]
+
+def pro():
+    import license
+    return license.is_pro()
+
+def license_view():
+    import license
+    s = license.status()
+    return {**s, 'features': [{'key': k, 'title': t, 'desc': d} for k, t, d in PRO_FEATURES],
+            'prices': {'inr': 699, 'inrLaunch': 499, 'usd': 19, 'usdLaunch': 12},
+            'autoClean': _auto_state()}
+
+# -- daily upkeep: licence recheck, Insights history snapshot, automatic clean-up ---
+def _history_path():
+    return os.path.join(_ctx['data_dir'], 'history.json')
+
+def history():
+    try:
+        with open(_history_path(), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+def _snapshot():
+    """One small record per day (totals by type), kept for 3 years. Collected for everyone,
+    so the history is already there the day someone gets Pro."""
+    day = time.strftime('%Y-%m-%d')
+    rows = history()
+    if rows and rows[-1].get('day') == day:
+        return
+    eng = _ctx['engine']
+    if eng.state != 'ready' or eng.ix.n == 0:
+        return
+    d = insights(False)
+    rows.append({'day': day, 'bytes': d['totals']['bytes'], 'files': d['totals']['files'],
+                 'types': {t['cat']: t['bytes'] for t in d['types']}})
+    rows = rows[-1100:]
+    tmp = _history_path() + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(rows, f)
+    os.replace(tmp, _history_path())
+
+def _auto_state():
+    s = settings()
+    return {'on': bool(s.get('autoClean')), 'last': s.get('autoCleanLast', 0), 'freed': s.get('autoCleanFreed', 0)}
+
+def auto_clean(force=False):
+    """Clear temp files (older than 2 days) and app/browser caches. Monthly, Pro, opt-in."""
+    import cleanup
+    s = settings()
+    if not force and (not s.get('autoClean') or not pro() or time.time() - s.get('autoCleanLast', 0) < 30 * 86400):
+        return None
+    now = time.time()
+    paths = [p for p, _, m in cleanup._walk_files(cleanup.TEMP) if now - m > 2 * 86400]
+    for root in list(cleanup.browser_cache_dirs()) + cleanup.APP_CACHE_DIRS:
+        if os.path.isdir(root):
+            paths += [p for p, _, _ in cleanup._walk_files(root)]
+    paths = [p for p in paths if not cleanup.protected(p)]     # never Windows, Program Files or Riffle's own data
+    freed = cleanup.delete(paths)
+    save_settings({'autoCleanLast': int(now), 'autoCleanFreed': int(freed)})
+    return freed
+
+def _upkeep():
+    """Runs a few minutes after start, then every 6 hours. Cheap when there's nothing to do."""
+    import license
+    from dupes import background_priority
+    time.sleep(240)
+    while True:
+        background_priority(True)
+        for job in (license.recheck_if_due, _snapshot, auto_clean):
+            try:
+                job()
+            except Exception as e:
+                print(f'[riffle] upkeep {getattr(job, "__name__", job)}: {e}')
+        background_priority(False)
+        time.sleep(6 * 3600)
+
 # -- updates -------------------------------------------------------------------------
 def _vtuple(v):
     return tuple(int(x) for x in v.lstrip('v').split('.') if x.isdigit())
 
+def _update_from_riffle_server():
+    """riffle.bliink.in answers with the latest version and counts this install once a day
+    (random install id, version and tier only). Returns True when it answered."""
+    import license
+    from urllib.parse import urlencode
+    qs = urlencode({'v': _ctx.get('version', ''), 'tier': license.status()['tier'], 'iid': license.install_id()})
+    try:
+        req = urllib.request.Request(f'{license.SERVER}/api/update.php?{qs}', headers={'User-Agent': 'Riffle'})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            u = json.load(r)
+    except Exception:
+        return False
+    if not u.get('latest'):
+        return False
+    _update.update(latest=str(u['latest']).lstrip('v'), url=u.get('url'), notes=(u.get('notes') or '')[:1200])
+    return True
+
 def check_update(force=False):
-    """Ask GitHub for the latest release, at most once a day."""
+    """Latest version, asked at most once a day: riffle.bliink.in first, GitHub as a fallback."""
     repo = _ctx.get('repo')
-    if not repo or not settings().get('updates', True):
+    if not settings().get('updates', True):
         return {'current': _ctx.get('version'), 'available': False}
     if force or time.time() - _update['checked'] > 86400:
         _update['checked'] = time.time()
-        try:
+        if not _update_from_riffle_server() and repo:
+          try:
             req = urllib.request.Request(UPDATE_URL.format(repo=repo),
                                          headers={'User-Agent': 'Riffle', 'Accept': 'application/vnd.github+json'})
             with urllib.request.urlopen(req, timeout=8) as r:
@@ -757,7 +903,7 @@ def check_update(force=False):
                           if a['name'].lower().endswith('.exe')), rel.get('html_url'))
             _update.update(latest=rel.get('tag_name', '').lstrip('v'), url=setup,
                            notes=(rel.get('body') or '')[:1200])
-        except Exception:
+          except Exception:
             pass
     latest = _update['latest']
     newer = bool(latest) and _vtuple(latest) > _vtuple(_ctx.get('version', '0'))
