@@ -235,6 +235,10 @@ def _send_file(h, path, ctype):
                 return
             left -= len(chunk)
 
+def _online(path):
+    import cloud
+    return cloud.online_only(path)
+
 def _peek_text(path, limit=96 * 1024):
     with open(path, 'rb') as f:
         raw = f.read(limit + 1)
@@ -266,13 +270,20 @@ def get(h, path):
             if not ctype:
                 h._send(415, 'not previewable', 'text/plain')
                 return True
+            if _online(p) and 'fetch=1' not in h.path:
+                h._send(409, 'online only', 'text/plain')
+                return True
             _send_file(h, p, ctype)
             return True
         import shellthumb
         q = parse_qs(h.path.partition('?')[2])
         size = max(16, min(1024, int(q.get('s', ['256'])[0])))
-        png = shellthumb.icon(p, _ext(p) if os.path.isfile(p) else '<dir>', size) if path == '/api/icon' \
-            else shellthumb.image(p, size)
+        if path == '/api/icon':
+            png = shellthumb.icon(p, _ext(p) if os.path.isfile(p) else '<dir>', size)
+        elif _online(p):      # cloud-only: a cached thumbnail or the icon, never a download
+            png = shellthumb.image(p, size, cache_only=True) or shellthumb.image(p, size, icon_only=True)
+        else:
+            png = shellthumb.image(p, size)
         if not png:
             h._send(404, 'no image', 'text/plain')
             return True
@@ -321,6 +332,7 @@ def get(h, path):
 STATIC = {'ui-extra.css': 'text/css; charset=utf-8', 'ui-extra.js': 'text/javascript; charset=utf-8',
           'ui-settings.css': 'text/css; charset=utf-8', 'ui-settings.js': 'text/javascript; charset=utf-8',
           'ui-insights.css': 'text/css; charset=utf-8', 'ui-insights.js': 'text/javascript; charset=utf-8',
+          'ui-cloud.css': 'text/css; charset=utf-8', 'ui-cloud.js': 'text/javascript; charset=utf-8',
           'ui-pro.css': 'text/css; charset=utf-8', 'ui-pro.js': 'text/javascript; charset=utf-8',
           'fonts/fonts.css': 'text/css; charset=utf-8',
           'fonts/instrument-sans.woff2': 'font/woff2', 'fonts/dm-mono-300.woff2': 'font/woff2',
@@ -368,6 +380,14 @@ def post(h, path, body):
         info = {'size': st.st_size, 'mtime': st.st_mtime, 'ctime': st.st_ctime,
                 'kind': mimetypes.guess_type(p)[0] or ''}
         ext = _ext(p)
+        import cloud
+        prov = cloud.provider(p)
+        if prov:
+            info['cloud'] = prov
+            # Reading an online-only file downloads it: wait until the user asks.
+            if cloud.online_only(p, prov) and not body.get('fetch'):
+                info['online'] = True
+                return _json(h, info)
         if ext in INLINE_EXT:
             info['inline'] = INLINE_EXT[ext].split('/')[0] if ext != 'pdf' else 'pdf'
         elif ext in TEXT_EXT or (st.st_size < 2_000_000 and not ext):

@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
+import cloud
 import features
 
 VERSION = '1.1.0'
@@ -1191,8 +1192,41 @@ class Engine:
             if d:
                 dm = ix.scope_mask(d)
                 m &= ~dm[ix.parent[idx]]
+        if f.get('cloud'):                          # 'any' or one provider's sync folders
+            dm = self._cloud_dirs(f['cloud'])
+            if dm is None:
+                m[:] = False
+            else:
+                m &= dm[ix.parent[idx]]
 
         return idx[m]
+
+    def _cloud_dirs(self, which='any'):
+        """Per-directory mask: inside a cloud sync folder (all, or one provider). None when there are none."""
+        ix = self.ix
+        roots = [r for r, p in cloud.sync_roots() if which == 'any' or p == which]
+        if not roots:
+            return None
+        dm = np.zeros(len(ix.dirs), dtype=bool)
+        for r in roots:
+            dm |= ix.scope_mask(r.lower().rstrip('\\'))
+        return dm
+
+    def _cloud_counts(self, base):
+        """[[provider, n]] in results before the cloud filter, so each chip shows what it would give."""
+        provs = list(dict.fromkeys(p for _r, p in cloud.sync_roots()))
+        if not provs or not base.size:
+            return [[p, 0] for p in provs]
+        par = self.ix.parent[base]
+        return [[p, int(self._cloud_dirs(p)[par].sum())] for p in provs]
+
+    def _cloud_fields(self, row):
+        prov = cloud.provider(row['dir'])
+        if prov:
+            row['cloud'] = prov
+            if row['cat'] != 'folder':
+                row['online'] = cloud.online_only(os.path.join(row['dir'], row['name']), prov)
+        return row
 
     # -- relevance: what a person most likely means ------------------------------
     APP_EXT = ('lnk', 'exe', 'appref-ms', 'url')
@@ -1252,9 +1286,9 @@ class Engine:
             cat = 'app'
         term = (q.strip().lower().split() or [''])[0]
         at = name.lower().find(term) if term else -1
-        return {'name': name, 'dir': d, 'path': d + ('' if d.endswith(('\\', '/')) else os.sep) + name,
+        return self._cloud_fields({'name': name, 'dir': d, 'path': d + ('' if d.endswith(('\\', '/')) else os.sep) + name,
                 'ext': ext, 'cat': cat, 'size': int(ix.size[j]), 'mtime': int(ix.mtime[j]),
-                'hl': [at, at + len(term)] if at >= 0 else None}
+                'hl': [at, at + len(term)] if at >= 0 else None})
 
     def quick(self, q, limit=8, filters=None):
         """The quick bar's search: best matches only, or recent files for an empty query."""
@@ -1366,17 +1400,20 @@ class Engine:
             page = sel[offset:offset + limit]
             rows = []
             for j in page.tolist():
-                rows.append({
+                rows.append(self._cloud_fields({
                     'name': ix.name(j),
                     'dir': ix.dirs[ix.parent[j]],
                     'size': int(ix.size[j]),
                     'mtime': int(ix.mtime[j]),
                     'cat': CATS[int(ix.cat[j])],
                     'ext': ix.exts[int(ix.extv[j])],
-                })
+                }))
+            cloud_base = self._apply(hits, {k: v for k, v in filters.items() if k != 'cloud'}) \
+                if filters.get('cloud') else sel
             return {
                 'total': total,
                 'rows': rows,
+                'clouds': self._cloud_counts(cloud_base) if offset == 0 else [],
                 'cats': {CATS[i]: int(c) for i, c in enumerate(cat_counts)},
                 'exts': ext_counts,
                 'hist': hist,

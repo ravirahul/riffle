@@ -57,6 +57,7 @@ gdi32.DeleteObject.argtypes = [W.HANDLE]
 SIIGBF_BIGGERSIZEOK = 0x1
 SIIGBF_ICONONLY = 0x4
 SIIGBF_THUMBNAILONLY = 0x8
+SIIGBF_INCACHEONLY = 0x10
 
 _com = threading.local()
 
@@ -94,8 +95,9 @@ def _bitmap_png(hbm):
         gdi32.DeleteDC(dc)
     return _png(w, h, buf.raw)
 
-def image(path, size=256, icon_only=False, thumb_only=False):
-    """PNG bytes for `path`, or None. Thumbnail with icon fallback by default."""
+def image(path, size=256, icon_only=False, thumb_only=False, cache_only=False):
+    """PNG bytes for `path`, or None. Thumbnail with icon fallback by default.
+    cache_only: only a thumbnail Windows already has, so an online-only cloud file isn't downloaded."""
     _init_com()
     ptr = ctypes.c_void_p()
     try:
@@ -110,6 +112,8 @@ def image(path, size=256, icon_only=False, thumb_only=False):
         flags |= SIIGBF_ICONONLY
     if thumb_only:
         flags |= SIIGBF_THUMBNAILONLY
+    if cache_only:
+        flags |= SIIGBF_INCACHEONLY
     hbm = W.HBITMAP()
     try:
         GetImage(vtbl[3])(ptr, SIZE(size, size), flags, ctypes.byref(hbm))

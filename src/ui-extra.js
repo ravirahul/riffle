@@ -130,12 +130,25 @@ async function paintPreview(force){
     </div>`;
   stage.innerHTML = `<img class="ico" src="${fileURL("icon", p, 256)}" alt="">`;
   if (dir) return;
-  const d = await api("/api/peek", { path:p }).catch(() => ({}));
+  const fetched = pv.fetch === p;
+  const d = await api("/api/peek", { path:p, fetch:fetched }).catch(() => ({}));
   if (seq !== pv.seq) return;
   if (d.error && !d.size) return;
   if (d.ctime) $("#pvInfo .pv-meta").insertAdjacentHTML("beforeend",
     `<dt>Created</dt><dd>${new Date(d.ctime * 1000).toLocaleString()}</dd>`);
-  const src = fileURL("file", p);
+  if (d.cloud) $("#pvInfo .pv-meta").insertAdjacentHTML("beforeend",
+    `<dt>Cloud</dt><dd>${esc(d.cloud)} · ${d.online ? "online only" : "on this PC"}</dd>`);
+  if (d.online){
+    // Reading it would download it: show the cached thumbnail and let the user decide.
+    const img = new Image();
+    img.onload = () => { if (seq === pv.seq){ stage.innerHTML = ""; stage.appendChild(img); } };
+    img.src = fileURL("thumb", p, 512);
+    $("#pvInfo .pv-acts").insertAdjacentHTML("beforebegin", `<div class="pv-cloud">
+      <span>Only in ${esc(d.cloud)}. Previewing downloads ${fmtSize(d.size)} to this PC.</span>
+      <button class="btn" data-cf>Download &amp; preview</button></div>`);
+    return;
+  }
+  const src = fileURL("file", p) + (fetched ? "&fetch=1" : "");
   if (d.inline === "image")
     stage.innerHTML = `<img src="${src}" alt="${esc(r.name)}" onerror="this.src='${fileURL("thumb", p, 512)}'">`;
   else if (d.inline === "video")
@@ -158,6 +171,7 @@ async function paintPreview(force){
   $("#preview").classList.toggle("big", pv.big);
 }
 $("#pvInfo").addEventListener("click", e => {
+  if (e.target.closest("[data-cf]")){ pv.fetch = pv.path; return paintPreview(true); }
   const b = e.target.closest("[data-pa]");
   const r = currentRow();
   if (b && r) act(b.dataset.pa, [r]);

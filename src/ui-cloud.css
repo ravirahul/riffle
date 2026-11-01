@@ -1,0 +1,9 @@
+/* Cloud badge on rows, Cloud chips, online-only note in preview */
+.cb{display:inline-flex;vertical-align:-2px;margin-left:7px;color:var(--live)}
+.cb svg{width:14px;height:14px;fill:var(--live-soft);stroke:currentColor;stroke-width:1.8;stroke-linejoin:round}
+.cb.off{color:var(--muted)}
+.cb.off svg{fill:none;stroke-dasharray:3 2}
+.cb .sr,.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+#cloudChips .chip svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round}
+.pv-cloud{display:flex;flex-direction:column;gap:8px;align-items:flex-start;margin:4px 0 12px;padding:10px 12px;
+  border:1px dashed var(--rule-2);border-radius:2px;font-size:12px;color:var(--ink-2)}

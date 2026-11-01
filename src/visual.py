@@ -548,6 +548,8 @@ def list_source(src, label, known, seen, todo):
                 continue
             if ext in IMAGE_EXT and st.st_size < MIN_IMAGE_BYTES:
                 continue
+            if getattr(st, "st_file_attributes", 0) & 0x00441000:  # cloud placeholder: reading would download it
+                continue
             if known.get(str(p)) != (st.st_mtime, st.st_size):
                 todo.append(local_job(p, st, src))
         state["current"] = f"Finding files · {len(seen):,} found"
