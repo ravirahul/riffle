@@ -68,6 +68,7 @@ email.message
 email.parser
 email.quoprimime
 email.utils
+encodings.cp1252
 encodings.idna
 enum
 fnmatch
