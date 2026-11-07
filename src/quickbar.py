@@ -264,6 +264,26 @@ def _glass(hwnd, tint):
     except (AttributeError, OSError):
         return False
 
+class _SPS(ctypes.Structure):
+    _fields_ = [('ac', ctypes.c_ubyte), ('flag', ctypes.c_ubyte), ('pct', ctypes.c_ubyte),
+                ('saver', ctypes.c_ubyte), ('life', ctypes.c_ulong), ('full', ctypes.c_ulong)]
+
+def _blur_on():
+    """False when Windows has see-through effects off: the Transparency setting, or Energy saver.
+    The blur then shows as a flat tint (same as the Start menu), so Glass draws solid instead."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
+            if not winreg.QueryValueEx(k, 'EnableTransparency')[0]:
+                return False
+    except OSError:
+        pass
+    s = _SPS()
+    if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s)) and s.saver == 1:
+        return False
+    return True
+
 def _glass_supported():
     import sys
     return sys.getwindowsversion().build >= 17134               # Windows 10 1803+
@@ -391,10 +411,13 @@ class QuickBar:
     def _apply_theme(self):
         name = 'dark' if (self._safe(self._theme) or 'light') == 'dark' else 'light'
         look = 'glass' if self._safe(self._look) == 'glass' and _glass_supported() else 'paper'
+        if look == 'glass' and not _blur_on():
+            look = 'glass-solid'                       # same colours, no see-through (Windows has it off)
         if (name, look) == self._tname:
             return
         self._tname = (name, look)
-        self.c = GLASS[name] if look == 'glass' else THEMES[name]
+        self.c = (GLASS[name] if look == 'glass' else dict(GLASS[name], tint=None) if look == 'glass-solid'
+                  else THEMES[name])
         c = self.c
         try:
             self.root.attributes('-transparentcolor', c['card'] if look == 'glass' else '')
@@ -557,9 +580,12 @@ class QuickBar:
         if data.get('png'):
             try:
                 img = tk.PhotoImage(master=self.root, data=base64.b64encode(data['png']))
-                f = math.ceil(max(img.width() / px, img.height() / px, 1))
+                box = self._px(44) if data.get('site') else px
+                f = math.ceil(max(img.width() / box, img.height() / box, 1))
                 if f > 1:
                     img = img.subsample(f)
+                elif data.get('site') and img.width() * 2 <= box:
+                    img = img.zoom(box // img.width())
             except tk.TclError:
                 img = None
         self._pv[key] = dict(data, img=img, png=None)
@@ -784,6 +810,8 @@ class QuickBar:
                            width=inner)
             return
         d = self._pv.get(self._key(r))
+        if r.get('kind') in ('web', 'site'):
+            return self._draw_site(r, d, bx, by, inner, y1)
         box_h = min(px, (y1 - y0) - p(96))
         if d is None:
             cv.create_text(bx + inner // 2, by + box_h // 2, text='…', fill=c['muted'], font=self.f_name)
@@ -802,7 +830,12 @@ class QuickBar:
             if img:
                 cv.create_image(bx + inner // 2, by + box_h // 2, image=img)
         ny = by + box_h + p(14)
-        cv.create_text(bx, ny, text=self._clip_end(r.get('name') or '', inner, self.f_name),
+        tx = bx
+        icon = self._icon(r)
+        if icon:                                        # file-type icon beside the name
+            cv.create_image(bx + self._icon_px // 2, ny + self.f_name.metrics('linespace') // 2, image=icon)
+            tx = bx + self._icon_px + p(8)
+        cv.create_text(tx, ny, text=self._clip_end(r.get('name') or '', inner - (tx - bx), self.f_name),
                        anchor='nw', fill=c['ink'], font=self.f_name)
         meta = []
         if d and d.get('meta'):
@@ -815,6 +848,39 @@ class QuickBar:
             meta.append('online only')
         cv.create_text(bx, ny + p(24), text=self._clip_end('  ·  '.join(meta), inner, self.f_small),
                        anchor='nw', fill=c['muted'], font=self.f_small)
+
+    def _draw_site(self, r, d, bx, by, inner, y1):
+        """A website: its icon, title, address and how often you went there."""
+        cv, c, p = self.cv, self.c, self._px
+        tile = p(64)
+        self._round_rect(bx, by, bx + tile, by + tile, p(14), '#FFFFFF')   # most site icons are drawn for white
+        img = (d or {}).get('img') or self._icon(r)
+        if img:
+            cv.create_image(bx + tile // 2, by + tile // 2, image=img)
+        y = by + tile + p(16)
+        t = cv.create_text(bx, y, text=r.get('title') or r.get('name') or '', anchor='nw', fill=c['ink'],
+                           font=self.f_name, width=inner)
+        y = cv.bbox(t)[3] + p(4)
+        url = str(r.get('url') or r.get('target') or '')
+        host = r.get('host') or (url.split('/')[2] if '//' in url else url)
+        t = cv.create_text(bx, y, text=host, anchor='nw', fill=c['ink2'], font=self.f_key)
+        y = cv.bbox(t)[3] + p(10)
+        if len(url) > 140:
+            url = url[:137] + '…'
+        t = cv.create_text(bx, y, text=url, anchor='nw', fill=c['muted'], font=self.f_small, width=inner)
+        y = cv.bbox(t)[3] + p(14)
+        facts = []
+        if r.get('visits'):
+            facts.append(f"Visited {r['visits']} time{'' if r['visits'] == 1 else 's'}")
+        if r.get('bookmarked'):
+            facts.append('In your bookmarks')
+        if r.get('mtime'):
+            facts.append('Last visit ' + time.strftime('%d %b %Y', time.localtime(int(r['mtime']))))
+        for f in facts:
+            t = cv.create_text(bx, y, text=f, anchor='nw', fill=c['ink2'], font=self.f_small)
+            y = cv.bbox(t)[3] + p(4)
+        hint = (d or {}).get('meta') or 'Enter opens it in your browser'
+        cv.create_text(bx, y1 - p(16), text=hint, anchor='sw', fill=c['muted'], font=self.f_small)
 
     def _round_rect(self, x1, y1, x2, y2, rad, fill):
         pts = [x1 + rad, y1, x2 - rad, y1, x2, y1, x2, y1 + rad, x2, y2 - rad, x2, y2,

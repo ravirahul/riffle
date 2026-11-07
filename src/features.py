@@ -739,21 +739,31 @@ def pack_activate():
     site = os.path.join(d, 'site')
     if site not in sys.path:
         sys.path.insert(0, site)
+        # the pack's DLLs need the C++ runtime the app ships in _internal; a PC without the
+        # Visual C++ redistributable only finds it if that folder is on the DLL search path
+        if getattr(sys, '_MEIPASS', None):
+            os.add_dll_directory(sys._MEIPASS)
         for sub in ('openvino\\libs', 'openvino', 'cv2', 'PIL'):
             p = os.path.join(site, sub)
             if os.path.isdir(p):
                 os.add_dll_directory(p)
     return os.path.join(d, 'models')
 
-def _release_asset(name):
-    req = urllib.request.Request(UPDATE_URL.format(repo=_ctx['repo']),
-                                 headers={'User-Agent': 'Riffle', 'Accept': 'application/vnd.github+json'})
+def _pack_assets():
+    """(zip url, size, sha256 url) from the newest release that carries the pack. A release
+    published without it (an app-only update) must not break visual search for new users."""
+    url = f"https://api.github.com/repos/{_ctx['repo']}/releases?per_page=15"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Riffle', 'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(req, timeout=15) as r:
-        rel = json.load(r)
-    for a in rel.get('assets', []):
-        if a['name'] == name:
-            return a['browser_download_url'], a.get('size', 0)
-    raise RuntimeError(f'{name} is not attached to the latest release')
+        releases = json.load(r)
+    for rel in releases:
+        if rel.get('draft') or rel.get('prerelease'):
+            continue
+        assets = {a['name']: a for a in rel.get('assets', [])}
+        z, sha = assets.get(PACK_NAME), assets.get(PACK_NAME + '.sha256')
+        if z and sha:
+            return z['browser_download_url'], z.get('size', 0), sha['browser_download_url']
+    raise RuntimeError('the visual pack is not on any recent Riffle release')
 
 def pack_install():
     if _pack['state'] == 'downloading':
@@ -767,8 +777,7 @@ def pack_install():
         os.makedirs(base, exist_ok=True)
         zpath = os.path.join(base, PACK_NAME + '.part')
         try:
-            url, size = _release_asset(PACK_NAME)
-            sum_url, _ = _release_asset(PACK_NAME + '.sha256')
+            url, size, sum_url = _pack_assets()
             with urllib.request.urlopen(urllib.request.Request(sum_url, headers={'User-Agent': 'Riffle'}), timeout=15) as r:
                 want = r.read().decode().split()[0].lower()
             _pack['total'] = size
@@ -785,6 +794,12 @@ def pack_install():
             tmp = pack_dir() + '.new'
             shutil.rmtree(tmp, ignore_errors=True)
             with zipfile.ZipFile(zpath) as z:
+                import sys
+                want_py = f'Python {sys.version_info.major}.{sys.version_info.minor}'
+                got_py = z.read('PACK.txt').decode('utf-8', 'replace') if 'PACK.txt' in z.namelist() else ''
+                if want_py not in got_py:
+                    raise RuntimeError(f'this visual pack is for a different Riffle build ({got_py.strip()}); '
+                                       'update Riffle and try again')
                 for m in z.namelist():                 # refuse paths escaping the folder
                     if m.startswith(('/', '\\')) or '..' in m.replace('\\', '/').split('/'):
                         raise RuntimeError('bad file in pack')

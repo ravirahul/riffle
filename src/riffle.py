@@ -2109,7 +2109,7 @@ def start_quickbar(url):
         if q in ('?', 'help'):
             return sources.help_rows()
         if not q:
-            return [dict(r, group='Recent') for r in ENGINE.quick('', limit, f)]
+            return [dict(r, group='Recent') for r in ENGINE.quick('', 5, f)]     # 5 keeps the bar compact
         if s.get('quickApps', True):
             apps.refresh()
         if s.get('quickHistory', True):
@@ -2159,8 +2159,12 @@ def start_quickbar(url):
         """Thumbnail PNG, or the first lines of a text file, for the bar's preview pane."""
         kind = r.get('kind')
         if kind in ('web', 'site'):
-            return {'text': (r.get('url') or r.get('target') or '') + '\n\n' + r.get('dir', ''),
-                    'meta': 'Opens in your browser'}
+            url = str(r.get('url') or r.get('target') or '')
+            exe = os.path.splitext(os.path.basename(default_browser_exe() or ''))[0].lower()
+            name = {'chrome': 'Chrome', 'msedge': 'Edge', 'brave': 'Brave', 'firefox': 'Firefox',
+                    'opera': 'Opera', 'vivaldi': 'Vivaldi'}.get(exe, 'your browser')
+            return {'png': history.favicon(url) if url.startswith('http') else None, 'site': True,
+                    'meta': f'Enter opens it in {name}'}
         if kind in ('app', 'setting'):
             return {'png': shellthumb.image(r.get('icon_path') or '', px // 2, icon_only=True),
                     'meta': 'App' if kind == 'app' else r.get('dir', 'Settings')}

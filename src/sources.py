@@ -343,6 +343,7 @@ class History:
 
     def __init__(self, limit=30000):
         self.limit, self.entries, self.stamp, self.checked = limit, [], None, 0.0
+        self.favdir, self.favdbs = None, []           # copies of each browser's Favicons database
         self.lock = threading.Lock()
         self._busy = False
 
@@ -379,6 +380,7 @@ class History:
                             p[3] = p[3] or bm
                         else:
                             pages[url] = [title, n, t, bm]
+            self._copy_favicons(profs)
             entries = []
             for url, (title, n, t, bm) in pages.items():
                 if not url.startswith(('http://', 'https://')):
@@ -392,6 +394,39 @@ class History:
             pass
         finally:
             self._busy = False
+
+    def _copy_favicons(self, profs):
+        if self.favdir is None:
+            self.favdir = tempfile.mkdtemp(prefix='riffle-favicons-')
+            import atexit
+            atexit.register(shutil.rmtree, self.favdir, True)
+        dbs = []
+        for i, (_, kind, folder) in enumerate(profs):
+            src = os.path.join(folder, 'Favicons')
+            if kind == 'chromium' and os.path.isfile(src):
+                dst = os.path.join(self.favdir, f'{i}.db')
+                try:
+                    shutil.copyfile(src, dst)
+                    dbs.append(dst)
+                except OSError:
+                    pass
+        self.favdbs = dbs
+
+    def favicon(self, url):
+        """PNG bytes of the site's icon as the browser saved it, or None."""
+        host = urlsplit(url).netloc
+        for db in list(self.favdbs):
+            try:
+                with closing(sqlite3.connect(f'file:{db}?mode=ro', uri=True)) as c:
+                    for sql, arg in (('m.page_url = ?', url), ('m.page_url LIKE ?', f'%://{host}/%')):
+                        row = c.execute('SELECT b.image_data FROM icon_mapping m JOIN favicon_bitmaps b '
+                                        f'ON b.icon_id = m.icon_id WHERE {sql} AND b.width <= 128 '
+                                        'ORDER BY b.width DESC LIMIT 1', (arg,)).fetchone()
+                        if row and row[0] and bytes(row[0][:4]) == b'\x89PNG':
+                            return bytes(row[0])
+            except sqlite3.Error:
+                continue
+        return None
 
     def rows(self, q, limit=2):
         q = q.strip().lower()
@@ -422,7 +457,7 @@ class History:
             visits = 'bookmark' if bm and not n else f'visited {n} time{"" if n == 1 else "s"}' if n else 'bookmark'
             out.append({'name': name, 'dir': f'{host} · {visits}', 'target': url, 'group': 'Websites',
                         'kind': 'site', 'score': min(s, 9.5), 'hl': _hl(name, q), 'mtime': int(t) if t > 0 else None,
-                        'url': url})
+                        'url': url, 'host': host, 'title': name, 'visits': n, 'bookmarked': bm})
             if len(out) >= limit:
                 break
         return out
