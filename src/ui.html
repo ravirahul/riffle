@@ -290,24 +290,8 @@ button,input,select{font:inherit;color:inherit}
 }
 .icobtn:hover{border-color:var(--ink)}
 .icobtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9}
-/* labelled on/off switches: Preview, and Light/Dark */
-.tgl{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border:1px solid var(--rule-2);border-radius:16px;
-  background:transparent;color:var(--ink);font:inherit;font-size:12.5px;cursor:pointer;flex-shrink:0;transition:.12s}
-.tgl:hover{border-color:var(--ink)}
-.tgl svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9}
-.tgl .sw{width:26px;height:15px;border-radius:8px;background:var(--rule-2);position:relative;transition:background .15s}
-.tgl .sw::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--card);transition:transform .15s}
-.tgl[aria-pressed="true"] .sw{background:var(--ink)}
-.tgl[aria-pressed="true"] .sw::after{transform:translateX(11px)}
-.thsw{width:56px;height:32px;border-radius:16px;border:1px solid var(--rule-2);background:var(--card);position:relative;
-  cursor:pointer;flex-shrink:0;padding:0;transition:border-color .12s}
-.thsw:hover{border-color:var(--ink)}
-.thsw .bg{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 8px;color:var(--muted)}
-.thsw .bg svg,.thsw .k svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.9}
-.thsw .k{position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--paper);
-  display:grid;place-items:center;transition:transform .18s}
-.thsw[aria-checked="true"] .k{transform:translateX(24px)}
-@media (prefers-reduced-motion:reduce){.tgl .sw,.tgl .sw::after,.thsw .k{transition:none}}
+/* icon toggles show their state: filled when on */
+#themeBtn[aria-checked="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 @media (max-width:1180px){.qwrap .kbd{display:none}}
 
 /* ── live pip ─────────────────────────────────────────────── */
@@ -480,16 +464,11 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
       <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
     </button>
     <input type="file" id="visFile" accept="image/*,video/*,.psd,.heic,.tif,.tiff" hidden>
-    <button class="tgl" id="pvBtn" title="Show or hide the preview panel (Space)" aria-pressed="false">
+    <button class="icobtn pvbtn" id="pvBtn" title="Preview panel: on/off (Space)" aria-label="Preview panel" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/></svg>
-      <span>Preview</span><i class="sw" aria-hidden="true"></i>
     </button>
-    <button class="thsw" id="themeBtn" role="switch" aria-checked="false" title="Dark mode (Ctrl+D)" aria-label="Dark mode">
-      <span class="bg" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
-        <svg viewBox="0 0 24 24"><path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/></svg>
-      </span>
-      <span class="k" aria-hidden="true"><svg viewBox="0 0 24 24" id="themeIcon"></svg></span>
+    <button class="icobtn" id="themeBtn" role="switch" aria-checked="false" title="Dark mode: on/off (Ctrl+D)" aria-label="Dark mode">
+      <svg viewBox="0 0 24 24" id="themeIcon" aria-hidden="true"></svg>
     </button>
   </div>
 
@@ -760,7 +739,7 @@ function loadPrefs(){
 function setTheme(t){
   document.documentElement.dataset.theme = t;
   $("#themeBtn").setAttribute("aria-checked", t === "dark");
-  $("#themeIcon").innerHTML = t === "dark"           // the knob shows the current mode
+  $("#themeIcon").innerHTML = t === "dark"           // moon (filled button) = dark mode on
     ? '<path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/>'
     : '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/>';
 }
