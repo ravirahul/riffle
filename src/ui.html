@@ -290,6 +290,25 @@ button,input,select{font:inherit;color:inherit}
 }
 .icobtn:hover{border-color:var(--ink)}
 .icobtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9}
+/* labelled on/off switches: Preview, and Light/Dark */
+.tgl{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border:1px solid var(--rule-2);border-radius:16px;
+  background:transparent;color:var(--ink);font:inherit;font-size:12.5px;cursor:pointer;flex-shrink:0;transition:.12s}
+.tgl:hover{border-color:var(--ink)}
+.tgl svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9}
+.tgl .sw{width:26px;height:15px;border-radius:8px;background:var(--rule-2);position:relative;transition:background .15s}
+.tgl .sw::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--card);transition:transform .15s}
+.tgl[aria-pressed="true"] .sw{background:var(--ink)}
+.tgl[aria-pressed="true"] .sw::after{transform:translateX(11px)}
+.thsw{width:56px;height:32px;border-radius:16px;border:1px solid var(--rule-2);background:var(--card);position:relative;
+  cursor:pointer;flex-shrink:0;padding:0;transition:border-color .12s}
+.thsw:hover{border-color:var(--ink)}
+.thsw .bg{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 8px;color:var(--muted)}
+.thsw .bg svg,.thsw .k svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.9}
+.thsw .k{position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--paper);
+  display:grid;place-items:center;transition:transform .18s}
+.thsw[aria-checked="true"] .k{transform:translateX(24px)}
+@media (prefers-reduced-motion:reduce){.tgl .sw,.tgl .sw::after,.thsw .k{transition:none}}
+@media (max-width:1180px){.qwrap .kbd{display:none}}
 
 /* ── live pip ─────────────────────────────────────────────── */
 .dot.live{background:var(--live);box-shadow:0 0 0 0 var(--live);animation:ring 2.4s ease-out infinite}
@@ -376,6 +395,9 @@ button,input,select{font:inherit;color:inherit}
 .badge.ok{border-color:var(--ink);color:var(--ink);background:linear-gradient(var(--mark),var(--mark)) 0 62%/100% 46% no-repeat}
 html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(--mark)}
 .vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+/* Pinterest-style: independent columns, each card as tall as its picture */
+.vmas{display:flex;gap:12px;align-items:flex-start}
+.vmas .vcol{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:12px}
 .vcard{background:var(--card);border:1px solid var(--rule-2);border-radius:3px;overflow:hidden;display:flex;flex-direction:column;cursor:default;transition:border-color .12s}
 .vcard:hover{border-color:var(--ink)}
 .vcard .im{aspect-ratio:4/3;background:var(--paper);position:relative;border-bottom:1px solid var(--rule)}
@@ -458,11 +480,16 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
       <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
     </button>
     <input type="file" id="visFile" accept="image/*,video/*,.psd,.heic,.tif,.tiff" hidden>
-    <button class="icobtn pvbtn" id="pvBtn" title="Preview (Space)" aria-label="Show preview" aria-pressed="false">
-      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/></svg>
+    <button class="tgl" id="pvBtn" title="Show or hide the preview panel (Space)" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/></svg>
+      <span>Preview</span><i class="sw" aria-hidden="true"></i>
     </button>
-    <button class="icobtn" id="themeBtn" title="Light or dark (Ctrl+D)" aria-label="Toggle theme">
-      <svg viewBox="0 0 24 24" id="themeIcon"></svg>
+    <button class="thsw" id="themeBtn" role="switch" aria-checked="false" title="Dark mode (Ctrl+D)" aria-label="Dark mode">
+      <span class="bg" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/></svg>
+      </span>
+      <span class="k" aria-hidden="true"><svg viewBox="0 0 24 24" id="themeIcon"></svg></span>
     </button>
   </div>
 
@@ -732,9 +759,10 @@ function loadPrefs(){
 }
 function setTheme(t){
   document.documentElement.dataset.theme = t;
-  $("#themeIcon").innerHTML = t === "dark"
-    ? '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/>'
-    : '<path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/>';
+  $("#themeBtn").setAttribute("aria-checked", t === "dark");
+  $("#themeIcon").innerHTML = t === "dark"           // the knob shows the current mode
+    ? '<path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/>'
+    : '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/>';
 }
 
 /* ── formatting ───────────────────────────────────────────── */
@@ -1322,6 +1350,7 @@ async function visualSearch(file){
     if (d.query) $("#vqMeta").textContent = `${d.query.w} × ${d.query.h} · ${fmtSize(file.size)}`;
     vis.results = d.results;
     $("#vbody").innerHTML = visResults(d.results);
+    masonry();
     $("#vbody").scrollTop = 0;
     $("#vbody").focus({ preventScroll:true });
     const proven = d.results.filter(x => x.match === "verified").length;
@@ -1359,8 +1388,9 @@ function vbtns(i, name, big){
       <button class="btn sm" data-vact="copypath" data-v="${i}" aria-label="Copy path of ${esc(name)}" title="Copy path">${VI.copy}</button></span>`;
 }
 function vcard(r, i){
-  return `<article class="vcard" tabindex="0" data-v="${i}">
-    <div class="im">${vthumb(r, r.name)}</div>
+  const ar = Math.min(2.4, Math.max(0.45, (r.w && r.h) ? r.w / r.h : 4 / 3));   // very long panoramas stay readable
+  return `<article class="vcard" tabindex="0" data-v="${i}" data-ar="${ar.toFixed(3)}">
+    <div class="im" style="aspect-ratio:${ar.toFixed(3)}">${vthumb(r, r.name)}</div>
     <div class="bd">
       <div class="nm" title="${esc(r.path)}">${esc(r.name)}</div>
       <div class="sub">${r.w} × ${r.h} · ${fmtSize(r.size)} · ${fmtDate(r.mtime)}</div>
@@ -1403,11 +1433,33 @@ function visResults(res){
     h += `<div class="vnote"><b>No exact match found.</b> None of these could be proven to be the same picture. The closest look-alikes are below, best first.</div>`;
   }
   if (vers.length) h += `<section class="vsec"><h2>Other versions <i>${vers.length}</i></h2>
-      <div class="vgrid">${vers.map(r => vcard(r, at(r))).join("")}</div></section>`;
+      <div class="vmas">${vers.map(r => vcard(r, at(r))).join("")}</div></section>`;
   if (sim.length) h += `<section class="vsec loose"><h2>Looks similar <i>${sim.length}</i></h2>
-      <div class="vgrid">${sim.map(r => vcard(r, at(r))).join("")}</div></section>`;
+      <div class="vmas">${sim.map(r => vcard(r, at(r))).join("")}</div></section>`;
   return h;
 }
+
+/* Pinterest layout: each card goes to the shortest column, so best matches still start top-left.
+   Heights come from the picture's own shape (w × h), so no waiting for thumbnails to load. */
+function masonry(){
+  document.querySelectorAll("#vbody .vmas").forEach(g => {
+    const cards = g._cards || (g._cards = [...g.querySelectorAll(".vcard")]);
+    const W = g.clientWidth;
+    if (!W || !cards.length) return;
+    const gap = 12, n = Math.max(1, Math.floor((W + gap) / (180 + gap)));
+    if (g._n === n) return;
+    g._n = n;
+    const cw = (W - gap * (n - 1)) / n, hs = new Array(n).fill(0);
+    const cols = hs.map(() => Object.assign(document.createElement("div"), { className: "vcol" }));
+    for (const c of cards){
+      const i = hs.indexOf(Math.min(...hs));
+      cols[i].appendChild(c);
+      hs[i] += cw / (+c.dataset.ar || 4 / 3) + 92 + gap;      // picture + the text block under it
+    }
+    g.replaceChildren(...cols);
+  });
+}
+new ResizeObserver(() => masonry()).observe($("#vbody"));
 
 const vrow = el => vis.results[+el.dataset.v];
 function vact(kind, r){
