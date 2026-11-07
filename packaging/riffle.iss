@@ -93,6 +93,18 @@ begin
     Result := CleanSource(Copy(Name, Length(Prefix) + 1, 100));
 end;
 
+{ Riffle runs with no window (tray + hotkey), so "close applications" can't see it and the
+  old Riffle.exe stays locked. Stop it before copying: ask first, then force. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var RC: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM Riffle.exe', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Sleep(1500);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM Riffle.exe /F', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Sleep(700);
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var Src, Existing: String;
 begin
