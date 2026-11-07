@@ -452,6 +452,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
       <button data-mode="substring" aria-pressed="true">Contains</button>
       <button data-mode="fuzzy" aria-pressed="false">Fuzzy</button>
       <button data-mode="regex" aria-pressed="false">Regex</button>
+      <button data-mode="content" aria-pressed="false" title="Words inside documents, from the Windows Search index">Inside</button>
     </div>
     <button class="icobtn" id="visBtn" title="Find the original of an image or video. You can also drop or paste one anywhere." aria-label="Search by image or video">
       <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
@@ -754,7 +755,7 @@ const fmtDate = t => {
 const esc = s => s.replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 function highlight(name){
   const out = esc(name);
-  if (!state.q || state.mode === "regex") return out;
+  if (!state.q || state.mode === "regex" || state.mode === "content") return out;
   const terms = state.mode === "fuzzy" ? [] : state.q.split(/\s+/).filter(Boolean);
   if (!terms.length) return out;
   const rx = new RegExp("(" + terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
@@ -979,7 +980,7 @@ async function act(kind, rows = selectedRows()){
   }
   const res = await fetch("/api/act", {
     method:"POST", headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ action:kind, paths })
+    body: JSON.stringify({ action:kind, paths, q:state.q })
   }).then(x => x.json()).catch(() => ({ ok:false, error:"the local server did not respond" }));
   if (!res.ok) toast(res.error || "That did not work");
   else if (kind === "recycle"){ toast(n > 1 ? `${n} items recycled` : "Sent to Recycle Bin"); state.marked.clear(); }

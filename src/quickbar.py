@@ -1,6 +1,7 @@
 """Riffle quick bar: a Spotlight-style search popup in plain tkinter + ctypes.
 
-    bar = QuickBar(search=, open_path=, reveal=, open_app=, icon_png=, theme=)
+    bar = QuickBar(search=, open_path=, reveal=, open_app=, icon_png=, theme=,
+                   content=, picked=, preview=, preview_on=)   # last four optional
     bar.start()            # own daemon thread runs the Tk mainloop, window hidden
     bar.toggle()           # from any thread
     bar.show('query')      # from any thread
@@ -10,16 +11,20 @@ the Tcl thread (Tcl is threaded in the Windows build). Nothing polls: while
 hidden the Tk thread sleeps in Tcl_DoOneEvent and the worker threads in
 queue.get(), so idle CPU is zero.
 """
+import ast
 import base64
 import ctypes
 import math
+import operator
 import queue
+import re
 import struct
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
 import zlib
+from collections import OrderedDict
 from ctypes import wintypes as W
 
 user32 = ctypes.windll.user32
@@ -37,16 +42,75 @@ THEMES = {
                  rule='#282B34', muted='#9AA0AE', mark='#FFD426', mark_ink='#14151A',
                  sel='#3A3420'),
 }
+# Glass: the window's background colour is made fully see-through (colour key) and Windows
+# blurs what is behind it (accent acrylic). `card` doubles as that key, `tint` is the blur's
+# colour as 0xAABBGGRR; text antialiases against the key, which matches the tint, so no halo.
+GLASS = {
+    'light': dict(paper='#F3F3F6', card='#F3F3F6', ink='#15161A', ink2='#2E3038', rule='#C9CBD3',
+                  muted='#4F525C', mark='#FFE24D', mark_ink='#15161A', sel='#DCDDE5', tint=0xC8F6F3F3),
+    'dark': dict(paper='#1E1E20', card='#1E1E20', ink='#F4F5F8', ink2='#D5D7DE', rule='#4A4D58',
+                 muted='#B4B8C4', mark='#FFD426', mark_ink='#14151A', sel='#3A3D4C', tint=0xB8201E1E),
+}
 CAT_DOT = {'document': '#3B6FD8', 'image': '#2E9E5B', 'video': '#8A4FD8', 'audio': '#D8487A',
            'code': '#1E9AA0', 'archive': '#D8892E', 'folder': '#E0B400', 'app': '#5A5E6B',
            'other': '#9A9488'}
 PER_FILE_ICON = {'exe', 'lnk', 'ico', 'url', 'appref-ms', 'msc', 'cur', 'ani'}
-HINTS = [('↵', 'open'), ('Ctrl+↵', 'show in folder'), ('Ctrl+C', 'copy path'),
+HINTS = [('?', 'help'), ('↵', 'open'), ('Ctrl+↵', 'show in folder'), ('Ctrl+C', 'copy path'),
          ('Tab', 'open in Riffle'), ('Esc', 'close')]
-MAX_ROWS = 8
+MAX_ROWS = 11                 # grouped: top hit + groups + inside files + web row
 
 # logical (96-dpi) sizes, multiplied by the monitor scale
 WIDTH, HEAD, ROW, FOOT, PAD, LABEL = 680, 60, 44, 34, 6, 24
+PREVIEW, PV_ROWS = 300, 6          # preview pane width; the list is at least this many rows tall beside it
+
+
+# ── calculator: "12*(3+4)" answers in the bar ─────────────────────────────
+_CALC_CHARS = re.compile(r'^[\d\s.,+\-*/x×÷^()%]+$')
+_CALC_OP = re.compile(r'[\d)]\s*[-+*/x×÷^%]\s*[\d(.]')
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod, ast.Pow: operator.pow}
+
+def calc(q):
+    """(answer to copy, answer to show) for a plain arithmetic query, else None. Never eval()s."""
+    s = (q or '').strip()
+    m = re.match(r'^([\d.,]+)\s*%\s*of\s*([\d.,]+)$', s, re.I)      # "18% of 4,500"
+    if m:
+        s = f'{m.group(1)}*{m.group(2)}/100'
+    if not _CALC_CHARS.match(s) or not _CALC_OP.search(s):
+        return None
+    e = s.replace(',', '').replace('×', '*').replace('x', '*').replace('÷', '/').replace('^', '**')
+
+    def ev(n):
+        if isinstance(n, ast.Constant) and type(n.value) in (int, float):
+            return n.value
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+            v = ev(n.operand)
+            return -v if isinstance(n.op, ast.USub) else v
+        if isinstance(n, ast.BinOp) and type(n.op) in _OPS:
+            a, b = ev(n.left), ev(n.right)
+            if isinstance(n.op, ast.Pow) and (abs(b) > 64 or abs(a) > 1e6):
+                raise ValueError('too big')
+            return _OPS[type(n.op)](a, b)
+        raise ValueError('not arithmetic')
+    try:
+        v = ev(ast.parse(e, mode='eval').body)
+    except (SyntaxError, ValueError, ZeroDivisionError, OverflowError, TypeError):
+        return None
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            return None
+        if v.is_integer() and abs(v) < 1e15:
+            v = int(v)
+    if isinstance(v, int):
+        return str(v), f'{v:,}'
+    t = f'{v:.10g}'
+    return t, t if 'e' in t else f'{v:,.10g}'
+
+def _size(n):
+    for u in ('bytes', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024 or u == 'TB':
+            return f'{n:.0f} {u}' if u == 'bytes' else f'{n:.1f} {u}'
+        n /= 1024
 
 
 # ── tiny PNG resampler (icons come as 32 px, rows want 20 px * scale) ──────
@@ -184,6 +248,26 @@ def _style_window(hwnd, rule):
     set_(hwnd, GCL_STYLE, get(hwnd, GCL_STYLE) | CS_DROPSHADOW)
     return ok
 
+class _ACCENT(ctypes.Structure):
+    _fields_ = [('AccentState', ctypes.c_int), ('AccentFlags', ctypes.c_int),
+                ('GradientColor', ctypes.c_uint), ('AnimationId', ctypes.c_int)]
+
+class _WCAD(ctypes.Structure):
+    _fields_ = [('Attribute', ctypes.c_int), ('Data', ctypes.c_void_p), ('SizeOfData', ctypes.c_size_t)]
+
+def _glass(hwnd, tint):
+    """Acrylic blur behind the window (tint 0xAABBGGRR), or off when tint is None. True if Windows took it."""
+    try:
+        a = _ACCENT(4 if tint else 0, 2, tint or 0, 0)       # 4 = ACCENT_ENABLE_ACRYLICBLURBEHIND
+        d = _WCAD(19, ctypes.cast(ctypes.pointer(a), ctypes.c_void_p), ctypes.sizeof(a))
+        return bool(user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(d)))
+    except (AttributeError, OSError):
+        return False
+
+def _glass_supported():
+    import sys
+    return sys.getwindowsversion().build >= 17134               # Windows 10 1803+
+
 def _border(hwnd, color):
     c = int(color[1:], 16)
     ref = ctypes.c_uint((c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16))  # COLORREF is BGR
@@ -191,9 +275,17 @@ def _border(hwnd, color):
 
 
 class QuickBar:
-    def __init__(self, search, open_path, reveal, open_app, icon_png, theme):
+    def __init__(self, search, open_path, reveal, open_app, icon_png, theme,
+                 content=None, picked=None, preview=None, preview_on=None, open_target=None, look=None):
         self._search, self._open_path, self._reveal = search, open_path, reveal
         self._open_app, self._icon_png, self._theme = open_app, icon_png, theme
+        self._content, self._picked = content, picked            # text-inside search, "you opened this"
+        self._open_target = open_target                           # URLs, settings pages, apps
+        self._look = look or (lambda: 'paper')                    # 'paper' | 'glass'
+        self._preview, self._preview_on = preview, preview_on or (lambda: True)
+        self._pv_show = False
+        self._pv_jobs, self._cjobs = queue.Queue(), queue.Queue()
+        self._pv, self._pv_pending = OrderedDict(), set()
         self.root = None
         self.hwnd = 0
         self.rounded = None             # True if DWM accepted the corner preference
@@ -214,6 +306,8 @@ class QuickBar:
         threading.Thread(target=self._run, name='quickbar-tk', daemon=True).start()
         threading.Thread(target=self._search_worker, name='quickbar-search', daemon=True).start()
         threading.Thread(target=self._icon_worker, name='quickbar-icons', daemon=True).start()
+        threading.Thread(target=self._content_worker, name='quickbar-content', daemon=True).start()
+        threading.Thread(target=self._preview_worker, name='quickbar-preview', daemon=True).start()
         self._ready.wait(5)
 
     def toggle(self):
@@ -244,7 +338,7 @@ class QuickBar:
         self._fonts = {}
         self.cv = cv = tk.Canvas(root, highlightthickness=0, bd=0)
         cv.pack(fill='both', expand=True)
-        self.var = tk.StringVar()
+        self.var = tk.StringVar(master=root)
         self.entry = tk.Entry(root, textvariable=self.var, relief='flat', bd=0,
                               highlightthickness=0, exportselection=False)
         self._apply_scale(1.0)
@@ -258,6 +352,7 @@ class QuickBar:
         e.bind('<Alt-Return>', lambda ev: self._to_app())
         e.bind('<Tab>', lambda ev: self._to_app())
         e.bind('<Escape>', lambda ev: self._esc())
+        e.bind('<F1>', lambda ev: self._help())
         e.bind('<Control-c>', self._copy)
         e.bind('<Control-C>', self._copy)
         cv.bind('<Motion>', self._hover)
@@ -289,13 +384,26 @@ class QuickBar:
         self._icon_px = round(20 * s)
         self._icons.clear()             # re-rasterise at the new size
         self._icon_pending.clear()
+        if hasattr(self, '_pv'):
+            self._pv.clear()
+            self._pv_pending.clear()
 
     def _apply_theme(self):
         name = 'dark' if (self._safe(self._theme) or 'light') == 'dark' else 'light'
-        if name == self._tname:
+        look = 'glass' if self._safe(self._look) == 'glass' and _glass_supported() else 'paper'
+        if (name, look) == self._tname:
             return
-        self._tname, self.c = name, THEMES[name]
+        self._tname = (name, look)
+        self.c = GLASS[name] if look == 'glass' else THEMES[name]
         c = self.c
+        try:
+            self.root.attributes('-transparentcolor', c['card'] if look == 'glass' else '')
+        except tk.TclError:
+            pass
+        if self.hwnd and not _glass(self.hwnd, c.get('tint')) and look == 'glass':
+            self.root.attributes('-transparentcolor', '')          # Windows said no: stay Paper
+            self._tname, self.c = (name, 'paper'), THEMES[name]
+            c = self.c
         self.root.configure(bg=c['card'])
         self.cv.configure(bg=c['card'])
         self.entry.configure(bg=c['card'], fg=c['ink'], insertbackground=c['ink'],
@@ -321,6 +429,7 @@ class QuickBar:
         x0, y0, mw, mh, s = _cursor_monitor()
         self._apply_scale(s)
         self._apply_theme()
+        self._pv_show = bool(self._preview) and self._safe(self._preview_on) is not False
         self._mon = (x0, y0, mw, mh)
         if q:
             self.var.set(q)             # traces schedule the search
@@ -335,6 +444,11 @@ class QuickBar:
         if not self.hwnd:
             self.hwnd = int(self.root.wm_frame(), 16)
             self.rounded = _style_window(self.hwnd, self.c['rule'])
+            if self.c.get('tint') and not _glass(self.hwnd, self.c['tint']):
+                self._tname = None                                   # retry as Paper
+                self._look = lambda: 'paper'
+                self._apply_theme()
+                self._paint()
         _force_foreground(self.hwnd)
         self.entry.focus_force()
         self.entry.select_range(0, 'end') if not q else self.entry.selection_clear()
@@ -369,27 +483,115 @@ class QuickBar:
                 job = self._jobs.get_nowait()
             seq, q = job
             rows = self._safe(self._search, q, MAX_ROWS) or []
-            self._call(self._results, seq, q, rows[:MAX_ROWS])
+            c = calc(q)
+            if c:
+                rows = [{'calc': True, 'value': c[0], 'name': c[1], 'path': '', 'group': 'Answer',
+                         'dir': q + '   ·   Enter copies the answer'}] + rows
+            rows = rows[:MAX_ROWS]
+            self._call(self._results, seq, q, rows)
+            if self._content and len(q) >= 3 and not c and not (rows and rows[0].get('kind') == 'help'):
+                self._cjobs.put((seq, q, rows))
 
-    def _results(self, seq, q, rows):
+    def _content_worker(self):
+        """Files whose text contains the query, added under the name matches once Windows answers."""
+        while True:
+            job = self._cjobs.get()
+            while not self._cjobs.empty():
+                job = self._cjobs.get_nowait()
+            seq, q, rows = job
+            if seq != self._seq:
+                continue
+            inside = self._safe(self._content, q, 2, [r['path'] for r in rows if r.get('path')]) or []
+            if inside and seq == self._seq:
+                web = [r for r in rows if r.get('group') == 'Search the web']
+                rest = [r for r in rows if r.get('group') != 'Search the web']
+                inside = [dict(r, group='Inside files') for r in inside][:max(1, MAX_ROWS - len(rows))]
+                self._call(self._results, seq, q, rest + inside + web, True)
+
+    def _results(self, seq, q, rows, keep=False):
         if seq != self._seq:
             return
+        cur = self._current() if keep else None
         self._rows, self._q_shown, self._sel = rows, q, 0
+        if cur in rows:
+            self._sel = rows.index(cur)
         self._layout()
+        self._want_preview()
+
+    # ── preview pane ─────────────────────────────────────────────────────
+    def _pv_box(self):
+        p = self._px
+        return p(PREVIEW) - p(32)       # square image box, inside the pane padding
+
+    @staticmethod
+    def _key(r):
+        return r.get('path') or str(r.get('target') or r.get('name') or '')
+
+    def _want_preview(self):
+        r = self._current()
+        if not self._pv_show or not r or r.get('calc') or r.get('kind') == 'help':
+            return
+        key = self._key(r)
+        if key not in self._pv and key not in self._pv_pending:
+            self._pv_pending.add(key)
+            self._pv_jobs.put((key, r, self._pv_box()))
+
+    def _preview_worker(self):
+        while True:
+            job = self._pv_jobs.get()
+            skipped = []
+            while not self._pv_jobs.empty():             # arrowing fast: only the last one
+                skipped.append(job[0])
+                job = self._pv_jobs.get_nowait()
+            key, r, px = job
+            data = self._safe(self._preview, r, px) or {}
+            self._call(self._pv_ready, key, data, px, skipped)
+
+    def _pv_ready(self, key, data, px, skipped=()):
+        for k in skipped:
+            self._pv_pending.discard(k)
+        self._pv_pending.discard(key)
+        if px != self._pv_box():
+            return
+        img = None
+        if data.get('png'):
+            try:
+                img = tk.PhotoImage(master=self.root, data=base64.b64encode(data['png']))
+                f = math.ceil(max(img.width() / px, img.height() / px, 1))
+                if f > 1:
+                    img = img.subsample(f)
+            except tk.TclError:
+                img = None
+        self._pv[key] = dict(data, img=img, png=None)
+        while len(self._pv) > 40:
+            self._pv.popitem(last=False)
+        r = self._current()
+        if self.shown and r and self._key(r) == key:
+            self._paint()
+        elif self.shown:
+            self._want_preview()
 
     # ── icons ────────────────────────────────────────────────────────────
     def _icon_key(self, r):
+        kind = r.get('kind')
+        if kind in ('app', 'setting'):
+            return r.get('icon_path') or '<settings>'
+        if kind in ('web', 'site'):
+            return '<web>'
         ext = (r.get('ext') or '').lower()
         if r.get('cat') == 'folder':
             return '<folder>'
         return r['path'] if ext in PER_FILE_ICON or not ext else ext
 
     def _icon(self, r):
+        if r.get('calc') or r.get('kind') == 'help':
+            return None
         key = self._icon_key(r)
         img = self._icons.get(key)
         if img is None and key not in self._icon_pending:
             self._icon_pending.add(key)
-            self._icon_jobs.put((key, r['path'], r.get('ext') or '', self._icon_px))
+            path = key if r.get('kind') in ('app', 'setting', 'web', 'site') else r['path']
+            self._icon_jobs.put((key, path, r.get('ext') or '', self._icon_px))
         return img or None
 
     def _icon_worker(self):
@@ -417,24 +619,36 @@ class QuickBar:
     def _px(self, v):
         return round(v * self._scale)
 
-    def _list_top(self):
-        return self._px(HEAD) + 1 + self._px(PAD) + (self._px(LABEL) if self._recent() else 0)
-
-    def _recent(self):
-        return not self._q_shown and bool(self._rows)
+    def _row_tops(self):
+        """(y of each row, [(y, label)] for each group heading, y below the last row)."""
+        p = self._px
+        y, tops, labels, prev = p(HEAD) + 1 + p(PAD), [], [], None
+        for r in self._rows:
+            g = r.get('group') or (None if self._q_shown else 'Recent')
+            if g and g != prev:
+                labels.append((y, g.upper()))
+                y += p(LABEL)
+            prev = g
+            tops.append(y)
+            y += p(ROW)
+        return tops, labels, y
 
     def _layout(self):
         p = self._px
         n = len(self._rows)
         body = 0
         if n:
-            body = p(PAD) * 2 + (p(LABEL) if self._recent() else 0) + n * p(ROW)
+            body = self._row_tops()[2] - (p(HEAD) + 1) + p(PAD)
+            if self._pv_show:
+                body = max(body, p(PAD) * 2 + PV_ROWS * p(ROW))
         elif self._q_shown:
             body = p(ROW)
-        w, h = p(WIDTH), p(HEAD) + 1 + body + 1 + p(FOOT)
+        w = p(WIDTH) + (p(PREVIEW) if self._pv_show else 0)
+        h = p(HEAD) + 1 + body + 1 + p(FOOT)
         x0, y0, mw, mh = getattr(self, '_mon', None) or _cursor_monitor()[:4]
         self._paint(w, h)
-        self.root.geometry(f'{w}x{h}+{x0 + (mw - w) // 2}+{y0 + round(mh * 0.22)}')
+        top = max(0, min(round(mh * 0.22), mh - h - p(20)))      # tall results move up, never off screen
+        self.root.geometry(f'{w}x{h}+{x0 + (mw - w) // 2}+{y0 + top}')
 
     def _paint(self, w=None, h=None):
         cv, c, p = self.cv, self.c, self._px
@@ -455,16 +669,18 @@ class QuickBar:
         cv.itemconfigure(self._ewin, width=w - p(42) - p(104), height=p(34))
         cv.create_line(0, p(HEAD), w, p(HEAD), fill=c['rule'])
         # body
-        y = p(HEAD) + 1 + p(PAD)
-        if self._recent():
-            cv.create_text(p(20), y + p(LABEL) // 2 + p(2), text='RECENT', anchor='w',
+        tops, labels, _ = self._row_tops()
+        for ly, text in labels:
+            cv.create_text(p(20), ly + p(LABEL) // 2 + p(2), text=text, anchor='w',
                            fill=c['muted'], font=self.f_tag)
-            y += p(LABEL)
         if not self._rows and self._q_shown:
             cv.create_text(p(20), p(HEAD) + 1 + p(ROW) // 2, text='No files named like that',
                            anchor='w', fill=c['muted'], font=self.f_name)
+        lw = p(WIDTH) if self._pv_show else w
         for i, r in enumerate(self._rows):
-            self._draw_row(i, r, y + i * p(ROW), w)
+            self._draw_row(i, r, tops[i], lw)
+        if self._pv_show and self._rows:
+            self._draw_preview(lw, p(HEAD) + 1, w, h - p(FOOT))
         # footer
         fy = h - p(FOOT)
         cv.create_line(0, fy, w, fy, fill=c['rule'])
@@ -504,7 +720,11 @@ class QuickBar:
             cv.create_rectangle(x1, y + p(10), x1 + p(2), y + rh - p(10), fill=c['ink'], outline='')
         ix, iy = p(30), y + rh // 2
         img = self._icon(r)
-        if img:
+        if r.get('calc'):
+            cv.create_text(ix, iy, text='=', fill=c['ink'], font=self.f_q)
+        elif r.get('kind') == 'help':
+            cv.create_text(ix, iy, text=r.get('glyph', '?'), fill=c['ink2'], font=self.f_key)
+        elif img:
             cv.create_image(ix, iy, image=img)
         else:
             d = p(4.5)
@@ -526,8 +746,75 @@ class QuickBar:
                 hl = True
         if hl is not True:
             cv.create_text(tx, ny, text=name, anchor='w', fill=c['ink'], font=self.f_name)
-        cv.create_text(tx, py, text=self._clip_mid(r.get('dir') or '', avail, self.f_path),
-                       anchor='w', fill=c['muted'], font=self.f_path)
+        sub = r.get('dir') or ''
+        if r.get('inside'):
+            tag = f'“{self._q_shown}” inside'
+            tw = self.f_small.measure(tag) + p(10)
+            cv.create_text(tx, py, text=tag, anchor='w', fill=c['ink2'], font=self.f_small)
+            cv.create_text(tx + tw, py, text=self._clip_mid(sub, avail - tw, self.f_path),
+                           anchor='w', fill=c['muted'], font=self.f_path)
+        else:
+            cv.create_text(tx, py, text=self._clip_mid(sub, avail, self.f_path),
+                           anchor='w', fill=c['muted'], font=self.f_path)
+
+    def _draw_preview(self, x0, y0, x1, y1):
+        """Right pane: thumbnail (or first lines of text), name, size and date of the selected row."""
+        cv, c, p = self.cv, self.c, self._px
+        cv.create_rectangle(x0, y0, x1, y1, fill=c['paper'], outline='')
+        cv.create_line(x0, y0, x0, y1, fill=c['rule'])
+        r = self._current()
+        if not r:
+            return
+        px, pad = self._pv_box(), p(16)
+        bx, by = x0 + pad, y0 + pad
+        inner = x1 - x0 - 2 * pad
+        if r.get('kind') == 'help':
+            cv.create_text(bx, by + p(6), text=r.get('title', r['name']), anchor='nw', fill=c['ink'],
+                           font=self.f_name, width=inner)
+            cv.create_text(bx, by + p(36), text=r.get('about', ''), anchor='nw', fill=c['ink2'],
+                           font=self.f_small, width=inner)
+            if r.get('fill') is not None:
+                cv.create_text(bx, y1 - p(16), text='Enter tries it', anchor='sw', fill=c['muted'],
+                               font=self.f_small)
+            return
+        if r.get('calc'):
+            cv.create_text(bx, by + p(10), text=r['dir'].split('   ·')[0], anchor='nw', fill=c['muted'],
+                           font=self.f_path, width=inner)
+            cv.create_text(bx, by + p(40), text='= ' + r['name'], anchor='nw', fill=c['ink'], font=self.f_q,
+                           width=inner)
+            return
+        d = self._pv.get(self._key(r))
+        box_h = min(px, (y1 - y0) - p(96))
+        if d is None:
+            cv.create_text(bx + inner // 2, by + box_h // 2, text='…', fill=c['muted'], font=self.f_name)
+        elif d.get('text') is not None:
+            self._round_rect(bx, by, bx + inner, by + box_h, p(6), c['card'])
+            lh = self.f_path.metrics('linespace')
+            ty = by + p(10)
+            for line in d['text'].expandtabs(4).splitlines()[:max(1, (box_h - p(20)) // lh)]:
+                cv.create_text(bx + p(10), ty, text=self._clip_end(line, inner - p(20), self.f_path),
+                               anchor='nw', fill=c['ink2'], font=self.f_path)
+                ty += lh
+        elif d.get('img'):
+            cv.create_image(bx + inner // 2, by + box_h // 2, image=d['img'])
+        else:
+            img = self._icon(r)
+            if img:
+                cv.create_image(bx + inner // 2, by + box_h // 2, image=img)
+        ny = by + box_h + p(14)
+        cv.create_text(bx, ny, text=self._clip_end(r.get('name') or '', inner, self.f_name),
+                       anchor='nw', fill=c['ink'], font=self.f_name)
+        meta = []
+        if d and d.get('meta'):
+            meta.append(d['meta'])
+        elif r.get('cat') != 'folder' and r.get('size') is not None:
+            meta.append(_size(int(r['size'])))
+        if r.get('mtime'):
+            meta.append(time.strftime('%d %b %Y, %H:%M', time.localtime(int(r['mtime']))))
+        if r.get('online'):
+            meta.append('online only')
+        cv.create_text(bx, ny + p(24), text=self._clip_end('  ·  '.join(meta), inner, self.f_small),
+                       anchor='nw', fill=c['muted'], font=self.f_small)
 
     def _round_rect(self, x1, y1, x2, y2, rad, fill):
         pts = [x1 + rad, y1, x2 - rad, y1, x2, y1, x2, y1 + rad, x2, y2 - rad, x2, y2,
@@ -563,20 +850,26 @@ class QuickBar:
         if self._rows:
             self._sel = (self._sel + d) % len(self._rows)
             self._paint()
+            self._want_preview()
         return 'break'
 
-    def _row_at(self, y):
-        i = (y - self._list_top()) // self._px(ROW)
-        return i if 0 <= i < len(self._rows) else None
+    def _row_at(self, y, x=0):
+        if self._pv_show and x >= self._px(WIDTH):
+            return None
+        for i, t in enumerate(self._row_tops()[0]):
+            if t <= y < t + self._px(ROW):
+                return i
+        return None
 
     def _hover(self, ev):
-        i = self._row_at(ev.y)
+        i = self._row_at(ev.y, ev.x)
         if i is not None and i != self._sel:
             self._sel = i
             self._paint()
+            self._want_preview()
 
     def _click(self, ev):
-        i = self._row_at(ev.y)
+        i = self._row_at(ev.y, ev.x)
         if i is not None:
             self._sel = i
             self._act(self._open_path)
@@ -584,10 +877,31 @@ class QuickBar:
     def _current(self):
         return self._rows[self._sel] if self._rows and self._sel < len(self._rows) else None
 
+    def _help(self):
+        self.var.set('?')
+        self.entry.icursor('end')
+        return 'break'
+
     def _act(self, fn):
         r = self._current()
-        if r:
-            threading.Thread(target=self._safe, args=(fn, r['path']), daemon=True).start()
+        if r and r.get('kind') == 'help':
+            if r.get('fill') is not None:                 # an example: put it in the box and search it
+                self.var.set(r['fill'])
+                self.entry.icursor('end')
+        elif r and r.get('calc'):
+            self._copy_text(r['value'])
+        elif r:
+            q = self.var.get().strip()
+            target = r.get('target')
+
+            def run():
+                if target is not None and self._open_target:
+                    self._safe(self._open_target, target)
+                else:
+                    self._safe(fn, r['path'])
+                if self._picked:
+                    self._safe(self._picked, self._key(r), q)
+            threading.Thread(target=run, daemon=True).start()
             self._hide()
         return 'break'
 
@@ -609,13 +923,31 @@ class QuickBar:
             return None                  # normal text copy
         r = self._current()
         if r:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(r['path'])
-            self._flash = 'Copied'
-            self._paint()
-            self.root.after(900, self._unflash)
+            self._copy_text(r['value'] if r.get('calc') else r.get('path') or r.get('url')
+                            or (r['target'] if isinstance(r.get('target'), str) else r['name']))
         return 'break'
+
+    def _copy_text(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._flash = 'Copied'
+        self._paint()
+        self.root.after(900, self._unflash)
 
     def _unflash(self):
         self._flash = None
         self._paint()
+
+
+if __name__ == '__main__':
+    assert calc('12*(3+4)') == ('84', '84')
+    assert calc('1,000 + 250') == ('1250', '1,250')
+    assert calc('10/4') == ('2.5', '2.5')
+    assert calc('2^10') == ('1024', '1,024')
+    assert calc('7 x 6') == ('42', '42')
+    assert calc('-3 + 1') == ('-2', '-2')
+    assert calc('18% of 4,500') == ('810', '810')
+    for no in ('2026', 'report 2', '1/0', '9^999', '__import__("os")', '', 'abc+1', '(1+'):
+        assert calc(no) is None, no
+    assert _size(1536) == '1.5 KB' and _size(12) == '12 bytes'
+    print('quickbar ok')

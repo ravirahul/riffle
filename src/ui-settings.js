@@ -176,6 +176,15 @@ function paintSettings(){
     + row("The hotkey opens", "The quick bar is a small search box that appears instantly over any app.",
         `<div class="seg2" id="sOpens">${[["bar", "Quick bar"], ["window", "Full window"]].map(([v, l]) =>
           `<button data-v="${v}" aria-pressed="${(s.hotkeyOpens || "bar") === v}">${l}</button>`).join("")}</div>`)
+    + row("Preview in the quick bar", "A picture or the first lines of the selected file, beside the results.", sw("sQPrev", s.quickPreview !== false))
+    + row("Quick bar look", "Glass needs Windows 11.", `<div class="seg2" id="sLook">${[["paper", "Paper"], ["glass", "Glass"]].map(([v, l]) =>
+          `<button data-v="${v}" aria-pressed="${(s.quickLook || "paper") === v}">${l}</button>`).join("")}</div>`)
+    + row("Apps in the quick bar", "Start menu and Microsoft Store apps.", sw("sQApps", s.quickApps !== false))
+    + row("Windows settings in the quick bar", "Pages like Bluetooth, Wi-Fi and Display.", sw("sQSet", s.quickSettings !== false))
+    + row("Browser history in the quick bar", "Pages and bookmarks from Chrome, Edge, Brave, Opera, Vivaldi and Firefox. Read on this PC only.", sw("sQHist", s.quickHistory !== false))
+    + row("Web search in the quick bar", "Open addresses you type, a search row at the end, and shortcuts: g, yt, maps, wiki.", sw("sQWeb", s.quickWeb !== false))
+    + row("Search engine", "", `<select id="sEngine">${[["google", "Google"], ["bing", "Bing"], ["duckduckgo", "DuckDuckGo"]].map(([v, l]) =>
+          `<option value="${v}" ${(s.searchEngine || "google") === v ? "selected" : ""}>${l}</option>`).join("")}</select>`)
     + row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
           : "Available in the installed app.", sw("sAuto", SV.autostart, !SV.canAutostart))
     + row("Theme", "", `<div class="seg2" id="sTheme">${["system", "light", "dark"].map(t =>
@@ -188,7 +197,7 @@ function paintSettings(){
     row("Hide system and app files", "Windows, Program Files, ProgramData, AppData and the Recycle Bin stay out of results.", sw("sSys", s.hideSystem))
     + row("Hide hidden files", "Dot-folders and dot-files such as .git, .cache and .gitignore.", sw("sHid", s.hideHidden))
     + row("Show recent files when the search box is empty", "Your newest files, ready the moment Riffle opens.", sw("sHome", s.homeRecent))
-    + row("Default match", "", `<div class="seg2" id="sMode">${[["substring", "Contains"], ["fuzzy", "Fuzzy"], ["regex", "Regex"]].map(([v, l]) =>
+    + row("Default match", "", `<div class="seg2" id="sMode">${[["substring", "Contains"], ["fuzzy", "Fuzzy"], ["regex", "Regex"], ["content", "Inside"]].map(([v, l]) =>
           `<button data-v="${v}" aria-pressed="${state.mode === v}">${l}</button>`).join("")}</div>`)
     + `<div class="sgroup">Never show these folders</div>
        <ul class="ledit" id="sEx">${(s.excludeDirs || []).map((d, i) =>
@@ -255,7 +264,8 @@ function paintSettings(){
 $("#set").addEventListener("change", e => {
   const id = e.target.id, v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   const map = { sAnim:"animation", sPrev:"previewOnStart", sUpd:"updates", sSys:"hideSystem", sHid:"hideHidden",
-                sHome:"homeRecent", sHotkey:"hotkey" };
+                sHome:"homeRecent", sHotkey:"hotkey", sQPrev:"quickPreview",
+                sQApps:"quickApps", sQSet:"quickSettings", sQHist:"quickHistory", sQWeb:"quickWeb", sEngine:"searchEngine" };
   if (map[id]) return saveSetting({ [map[id]]:v });
   if (id === "sAuto") return saveSetting({}, { autostart:v });
   if (id === "sDMin"){ $("#dMin").value = v; return saveSetting({ dupesMin:+v }); }
@@ -266,6 +276,7 @@ $("#set").addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
   if (b.closest("#sTheme")) return saveSetting({ theme:b.dataset.v });
   if (b.closest("#sOpens")) return saveSetting({ hotkeyOpens:b.dataset.v });
+  if (b.closest("#sLook")) return saveSetting({ quickLook:b.dataset.v });
   if (b.closest("#sMode")){
     document.querySelector(`.seg [data-mode="${b.dataset.v}"]`).click();
     return paintSettings();

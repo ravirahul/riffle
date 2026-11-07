@@ -55,6 +55,13 @@ DEFAULTS = {
     'theme': 'system',           # system | light | dark
     'previewOnStart': False,
     'homeRecent': True,          # empty search shows recently changed files
+    'quickPreview': True,        # quick bar shows a preview of the selected file
+    'quickLook': 'paper',        # paper | glass
+    'quickApps': True,           # quick bar: apps
+    'quickSettings': True,       # quick bar: Windows settings pages
+    'quickHistory': True,        # quick bar: browser history + bookmarks (read on this PC only)
+    'quickWeb': True,            # quick bar: open addresses, web search row, shortcuts
+    'searchEngine': 'google',    # google | bing | duckduckgo
     'updates': True,             # daily check for a new version
     'dupesMin': 1048576,
     'cleanDownloadsDays': 90,
@@ -102,7 +109,8 @@ def _clean_setting(k, v):
         if v not in HOTKEYS:
             raise ValueError('unknown hotkey')
         return v
-    allowed = {'theme': ('system', 'light', 'dark'), 'hotkeyOpens': ('bar', 'window')}[k]
+    allowed = {'theme': ('system', 'light', 'dark'), 'hotkeyOpens': ('bar', 'window'),
+               'quickLook': ('paper', 'glass'), 'searchEngine': ('google', 'bing', 'duckduckgo')}[k]
     if v not in allowed:
         raise ValueError(f'bad value for {k}')
     return v

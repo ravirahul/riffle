@@ -47,9 +47,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 import cloud
+import contentsearch
 import features
+import picks
+import sources
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 GITHUB_REPO = os.environ.get('RIFFLE_REPO', 'ravirahul/riffle')  # update checks
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Frozen builds (PyInstaller) unpack bundled resources to sys._MEIPASS;
@@ -865,6 +868,8 @@ class Engine:
         self.saved_gen = 0
         self.saved_at = 0.0
         self.refreshing = False
+        self.picks = picks.Picks(os.path.join(DATA_DIR, 'picks.json'))
+        self._pick_cache = None
         threading.Thread(target=self._drain_loop, daemon=True, name="drain").start()
 
     # -- live index maintenance ------------------------------------------------
@@ -1257,7 +1262,51 @@ class Engine:
         app_ext = np.array([ix.ext_id[e] for e in self.APP_EXT if e in ix.ext_id], dtype=np.int32)
         if app_ext.size:
             score += 6.0 * (ix.flag_mask('startmenu')[par] & np.isin(ix.extv[ids], app_ext))
+        bids, bval = self._pick_boost(q)
+        if bids.size:
+            k = np.minimum(np.searchsorted(bids, ids), bids.size - 1)
+            score += np.where(bids[k] == ids, bval[k], 0.0)
         return score
+
+    # -- learned picks: what you opened before ranks higher ---------------------
+    def _path_ids(self, pairs):
+        """{record id: summed bonus} for (path, bonus) pairs that are in the index."""
+        ix, out = self.ix, {}
+        for p, b in pairs:
+            d, n = os.path.split(p)
+            pid = ix.dir_id.get(d)
+            if pid is None:
+                continue
+            j = ix.find_id(n.lower().encode('utf-8', 'surrogatepass'), pid)
+            if j >= 0:
+                out[j] = out.get(j, 0.0) + b
+        return out
+
+    def _pick_boost(self, q):
+        """(sorted ids, bonus per id): frecency (cached per index state) plus this query's top hits."""
+        P, ix = self.picks, self.ix
+        if not P.paths:
+            return np.zeros(0, dtype=np.int64), np.zeros(0)
+        key = (P.version, id(ix), ix.n, ix.ndead)
+        if self._pick_cache is None or self._pick_cache[0] != key:
+            self._pick_cache = (key, self._path_ids(P.frecency()))
+        b = dict(self._pick_cache[1])
+        for j, v in self._path_ids(P.top_hits(q)).items():
+            b[j] = b.get(j, 0.0) + v
+        ids = np.fromiter(b.keys(), dtype=np.int64, count=len(b))
+        val = np.fromiter(b.values(), dtype=np.float64, count=len(b))
+        o = np.argsort(ids)
+        return ids[o], val[o]
+
+    def inside(self, q, limit=4, filters=None, skip=()):
+        """Quick bar rows for files whose text contains q (Windows Search), best first."""
+        paths = contentsearch.search(q, limit * 4 + len(skip))
+        skip = {p.lower() for p in skip}
+        with self.lock:
+            ids = [j for j in self._path_ids((p, 0.0) for p in paths if p.lower() not in skip)
+                   if self.ix.cat[j] != CAT_ARC]          # a zip "contains" the names of its files: noise
+            ids = self._apply(np.asarray(ids, dtype=np.int64), dict(filters or {}))[:limit]
+            return [dict(self._row(int(j)), inside=True) for j in ids.tolist()]
 
     def _best_order(self, ids, q, top=None):
         """ids ordered best first; with `top`, only the first `top` are fully sorted."""
@@ -1319,6 +1368,12 @@ class Engine:
 
     # The one call the UI makes for every keystroke.
     def query(self, q, mode, filters, sort, desc, offset, limit):
+        content = None
+        if mode == 'content':
+            if (q or '').strip():
+                content = contentsearch.search(q, 500)      # outside the lock: may be slow
+            else:
+                mode = 'substring'
         key = (q, mode, repr(sorted((filters or {}).items())), sort, desc)
         if key != getattr(self, '_last_key', None):        # a page refresh repeats the same key
             self._last_key = key
@@ -1331,7 +1386,10 @@ class Engine:
         with self.lock:
             ix = self.ix
             t0 = time.perf_counter()
-            hits = self._raw_hits(q or '', mode)
+            if content is not None:
+                hits = np.unique(np.fromiter(self._path_ids((p, 0.0) for p in content), dtype=np.int64))
+            else:
+                hits = self._raw_hits(q or '', mode)
             faceted = bool(filters.get('cats')) or bool(filters.get('exts'))
             if faceted:
                 base = self._apply(hits, {k: v for k, v in filters.items()
@@ -1710,6 +1768,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({'ok': True}))
 
         if path == '/api/act':
+            if body.get('action') in ('open', 'reveal', 'openfolder'):
+                for p in (body.get('paths') or [])[:3]:
+                    ENGINE.picks.record(p, body.get('q', ''))
             return self._send(200, json.dumps(shell_act(body.get('action', ''),
                                                         body.get('paths') or [])))
 
@@ -2025,7 +2086,7 @@ def start_quickbar(url):
         print(f'[riffle] quick bar unavailable: {e}')
         return
 
-    def search(q, limit):
+    def bar_filters():
         s = features.settings()
         f = {}
         if s.get('hideSystem', True):
@@ -2034,7 +2095,91 @@ def start_quickbar(url):
             f['hideHidden'] = True
         if s.get('excludeDirs'):
             f['excludeDirs'] = s['excludeDirs']
-        return ENGINE.quick(q, limit, f)
+        return f
+
+    apps = sources.Apps(os.path.join(DATA_DIR, 'apps.json'))
+    history = sources.History()
+    QUICK['history'] = history
+
+    def search(q, limit):
+        """Everything the bar shows for q: a Top hit, then Apps, Settings, Files, Websites, then the web row."""
+        s = features.settings()
+        f = bar_filters()
+        q = (q or '').strip()
+        if q in ('?', 'help'):
+            return sources.help_rows()
+        if not q:
+            return [dict(r, group='Recent') for r in ENGINE.quick('', limit, f)]
+        if s.get('quickApps', True):
+            apps.refresh()
+        if s.get('quickHistory', True):
+            history.refresh()
+        app_rows = apps.rows(q, 2) if s.get('quickApps', True) else []
+        names = {a['name'].lower() for a in app_rows}
+        files = []
+        for i, r in enumerate(ENGINE.quick(q, 4, f)):
+            stem = os.path.splitext(r['name'])[0].lower()
+            if r.get('ext') in ('lnk', 'url', 'appref-ms') and stem in names:
+                continue                                   # the app row already covers its shortcut
+            n = r['name'].lower()
+            score = 9 if n.startswith(q.lower()) else 7 if r.get('hl') and r['hl'][0] > 0 else 5
+            files.append(dict(r, kind='file', score=score - i * 0.5))
+        top, last = sources.web_rows(q, s.get('searchEngine', 'google')) if s.get('quickWeb', True) else (None, None)
+        setting_rows = sources.settings_rows(q, 2) if s.get('quickSettings', True) else []
+        site_rows = history.rows(q, 2) if s.get('quickHistory', True) else []
+        if top or app_rows or setting_rows or site_rows:
+            files = [r for r in files if r.get('hl')]       # drop close-match guesses when real matches exist
+        boosts = {}
+        for path, bonus in ENGINE.picks.top_hits(q):
+            boosts[path.lower()] = boosts.get(path.lower(), 0) + bonus * 2
+        return sources.compose([
+            ('Apps', app_rows),
+            ('Settings', setting_rows),
+            ('Files', files),
+            ('Websites', site_rows),
+        ], top_extra=top, last=last, boosts=boosts, max_rows=min(limit, 9))
+
+    def open_target(t):
+        if isinstance(t, list):
+            subprocess.Popen(t, creationflags=0x08000000)
+        else:
+            os.startfile(t)
+
+    def icon_png(p, ext):
+        if p == '<web>':
+            p, ext = default_browser_exe() or '', 'exe'
+        elif p.startswith('shell:') or ext == '':
+            return shellthumb.icon(p, '<dir>' if os.path.isdir(p) else '', 32)
+        return shellthumb.icon(p, ext, 32)
+
+    def content(q, limit, skip):
+        return ENGINE.inside(q, limit, bar_filters(), skip)
+
+    def preview(r, px):
+        """Thumbnail PNG, or the first lines of a text file, for the bar's preview pane."""
+        kind = r.get('kind')
+        if kind in ('web', 'site'):
+            return {'text': (r.get('url') or r.get('target') or '') + '\n\n' + r.get('dir', ''),
+                    'meta': 'Opens in your browser'}
+        if kind in ('app', 'setting'):
+            return {'png': shellthumb.image(r.get('icon_path') or '', px // 2, icon_only=True),
+                    'meta': 'App' if kind == 'app' else r.get('dir', 'Settings')}
+        p, ext, out = r['path'], (r.get('ext') or '').lower(), {}
+        if r.get('cat') == 'folder':
+            try:
+                with os.scandir(p) as it:
+                    n = sum(1 for _ in zip(it, range(10000)))
+                out['meta'] = f'{n:,}{"+" if n == 10000 else ""} item{"" if n == 1 else "s"}'
+            except OSError:
+                pass
+        elif ext in features.TEXT_EXT and not r.get('online') and 0 < (r.get('size') or 0) < 50 << 20:
+            with open(p, 'rb') as fh:
+                raw = fh.read(4096)
+            if b'\x00' not in raw:
+                out['text'] = raw.decode('utf-8', 'replace')
+        if 'text' not in out:
+            out['png'] = shellthumb.image(p, px, cache_only=bool(r.get('online')))
+        return out
 
     def open_app(q):
         features._ctx['inbox'] = q                  # the window picks this up when it gets focus
@@ -2046,11 +2191,36 @@ def start_quickbar(url):
         open_path=lambda p: shell_act('open', [p]),
         reveal=lambda p: shell_act('reveal', [p]),
         open_app=open_app,
-        icon_png=lambda p, ext: shellthumb.icon(p, ext or ('<dir>' if os.path.isdir(p) else ''), 32),
+        icon_png=icon_png,
+        open_target=open_target,
         theme=_system_theme,
+        content=content if contentsearch.available() else None,
+        picked=lambda p, q: ENGINE.picks.record(p, q),
+        preview=preview,
+        preview_on=lambda: features.settings().get('quickPreview', True),
+        look=lambda: features.settings().get('quickLook', 'paper'),
     )
     bar.start()
+    if contentsearch.available():
+        contentsearch.warm()
+    apps.refresh()
+    history.refresh(0)
     QUICK['bar'] = bar
+
+
+def default_browser_exe():
+    """Path of the default web browser, for the icon on web rows."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\Shell\Associations'
+                            r'\UrlAssociations\https\UserChoice') as k:
+            prog = winreg.QueryValueEx(k, 'ProgId')[0]
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog + r'\shell\open\command') as k:
+            cmd = winreg.QueryValueEx(k, '')[0]
+        m = re.match(r'\s*"([^"]+)"|\s*(\S+)', cmd)
+        return m.group(1) or m.group(2)
+    except (OSError, AttributeError):
+        return None
 
 VK_NAMES = {'space': 0x20, 'enter': 0x0D, 'tab': 0x09, '`': 0xC0, ';': 0xBA, '/': 0xBF, '.': 0xBE}
 

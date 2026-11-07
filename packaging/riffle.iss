@@ -1,6 +1,6 @@
 ; Inno Setup script for Riffle. Per-user install: no admin prompt.
 ; Build with build.bat (runs PyInstaller first).
-#define AppVer "1.1.0"
+#define AppVer "1.2.0"
 
 [Setup]
 ; Same AppId as 1.0.x so this upgrades the existing install in place.

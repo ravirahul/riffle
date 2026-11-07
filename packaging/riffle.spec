@@ -37,7 +37,7 @@ a = Analysis(
         (os.path.join(SRC, 'riffle.ico'), '.'),
         (os.path.join(SRC, 'fonts'), 'fonts'),
     ],
-    hiddenimports=['cloud', 'features', 'dupes', 'cleanup', 'shellthumb', 'visual', 'quickbar', 'license', 'numpy.core', 'numpy.core.multiarray',
+    hiddenimports=['cloud', 'features', 'dupes', 'cleanup', 'shellthumb', 'visual', 'quickbar', 'license', 'picks', 'contentsearch', 'sources', 'sqlite3', 'comtypes', 'comtypes.client', 'numpy.core', 'numpy.core.multiarray',
                    'tkinter', 'tkinter.filedialog', 'winreg'] + pack_stdlib,
     excludes=['openvino', 'openvino_telemetry', 'cv2', 'PIL', 'pillow_heif', 'torch',
               'matplotlib', 'scipy', 'pandas', 'IPython', 'pytest', 'setuptools',
