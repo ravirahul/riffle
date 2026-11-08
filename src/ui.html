@@ -754,7 +754,7 @@ const fmtSize = n => {
   return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + u[i];
 };
 const fmtDate = t => {
-  if (!t) return "—";
+  if (!t || t < 315619200) return "—";            // before 2 Jan 1980 = no real date (zip/DOS default)
   const d = new Date(t * 1000), now = Date.now() / 1000;
   const opts = (now - t < 86400 * 300)
     ? { month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false }

@@ -151,3 +151,40 @@
 .pv-more2 .pv-full{font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-all;margin-top:6px}
 .pv-acts .dots{width:36px;padding:0;font-size:16px;letter-spacing:1px}
 .pv-stage img{max-width:100%;max-height:100%;object-fit:contain}
+
+/* ── sidebar filter accordions ───────────────────────────────────────────── */
+.rail{width:248px}
+.acc{margin-top:18px;border-top:1px solid var(--rule);display:flex;flex-direction:column}
+.acc details{border-bottom:1px solid var(--rule)}
+.acc summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;padding:11px 4px;font-size:13px}
+.acc summary::-webkit-details-marker{display:none}
+.acc summary .t{font-weight:600}
+.acc summary .v{margin-left:auto;font-size:12px;color:var(--muted);max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acc summary .v.on{color:var(--ink);background:var(--mark-soft);padding:1px 7px;border-radius:9px}
+.acc summary::after{content:"";width:6px;height:6px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);
+  transform:rotate(-45deg);transition:transform .15s;flex-shrink:0}
+.acc details[open]>summary::after{transform:rotate(45deg)}
+.accin{padding:0 2px 14px;display:flex;flex-direction:column;gap:8px}
+.accin h4{margin:4px 0 0;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.accin .scope{padding:0;background:transparent}
+.accin .scope .hist{height:42px}
+.accin .field{width:100%;margin:0}
+.accin .grp{margin:0}
+.accin .grp h3{display:none}
+.accin .hint{margin:0}
+.clear2{margin:12px 4px;align-self:flex-start;border:0;background:none;font:inherit;font-size:12.5px;color:var(--ink);
+  text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:0}
+
+/* ── settings: Guide tab, About links as buttons ──────────────────────────── */
+.guide h2{margin:0 0 4px;font-size:18px}
+.guide .lede2{margin:0 0 14px;color:var(--ink-2);font-size:13px}
+.guide h3{margin:18px 0 6px;font-size:14px}
+.guide ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px;font-size:13px;line-height:1.55;color:var(--ink-2)}
+.guide b{color:var(--ink)}
+#sp-about .links{gap:8px;margin-top:12px}
+#sp-about .links a,#sp-about .mk-credit{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;
+  border:1px solid var(--rule-2);border-radius:8px;background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;font-size:13px}
+#sp-about .links a::after,#sp-about .mk-credit::after{content:"↗";font-size:12px;color:var(--muted)}
+#sp-about .links a:hover,#sp-about .mk-credit:hover{border-color:var(--ink)}
+#sp-about .links .hint{flex-basis:100%}
+.accin .scope .hd{display:none}                 /* the accordion heading already says it */

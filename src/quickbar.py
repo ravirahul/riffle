@@ -47,9 +47,9 @@ THEMES = {
 # colour as 0xAABBGGRR; text antialiases against the key, which matches the tint, so no halo.
 GLASS = {
     'light': dict(paper='#F3F3F6', card='#F3F3F6', ink='#15161A', ink2='#2E3038', rule='#C9CBD3',
-                  muted='#4F525C', mark='#FFE24D', mark_ink='#15161A', sel='#DCDDE5', tint=0xC8F6F3F3),
+                  muted='#4F525C', mark='#FFE24D', mark_ink='#15161A', sel='#DCDDE5', tint=0xB0F6F3F3),
     'dark': dict(paper='#1E1E20', card='#1E1E20', ink='#F4F5F8', ink2='#D5D7DE', rule='#4A4D58',
-                 muted='#B4B8C4', mark='#FFD426', mark_ink='#14151A', sel='#3A3D4C', tint=0xB8201E1E),
+                 muted='#B4B8C4', mark='#FFD426', mark_ink='#14151A', sel='#3A3D4C', tint=0xA0201E1E),
 }
 CAT_DOT = {'document': '#3B6FD8', 'image': '#2E9E5B', 'video': '#8A4FD8', 'audio': '#D8487A',
            'code': '#1E9AA0', 'archive': '#D8892E', 'folder': '#E0B400', 'app': '#5A5E6B',
@@ -57,7 +57,7 @@ CAT_DOT = {'document': '#3B6FD8', 'image': '#2E9E5B', 'video': '#8A4FD8', 'audio
 PER_FILE_ICON = {'exe', 'lnk', 'ico', 'url', 'appref-ms', 'msc', 'cur', 'ani'}
 MODES = ('search', 'image', 'voice')
 MODE_HINTS = {
-    'image': [('↵', 'choose a picture'), ('Ctrl+V', 'paste one'), ('← →', 'switch'), ('Esc', 'back')],
+    'image': [('↓ or ↵', 'choose a picture'), ('Ctrl+V', 'paste one'), ('← →', 'switch'), ('Esc', 'back')],
     'voice': [('↵', 'search now'), ('Esc', 'stop'), ('← →', 'switch')],
 }
 HINTS = [('?', 'help'), ('← →', 'image · voice'), ('↵', 'open'), ('Ctrl+↵', 'show in folder'), ('Ctrl+C', 'copy path'),
@@ -436,7 +436,10 @@ class QuickBar:
                   else THEMES[name])
         c = self.c
         try:
-            self.root.attributes('-transparentcolor', c['card'] if look == 'glass' else '')
+            # never before the window first exists: a window made see-through before it is shown never blurs.
+            # The first show applies it (see _show).
+            if self.hwnd:
+                self.root.attributes('-transparentcolor', c['card'] if look == 'glass' else '')
         except tk.TclError:
             pass
         if self.hwnd and not _glass(self.hwnd, c.get('tint')) and look == 'glass':
@@ -485,6 +488,16 @@ class QuickBar:
         if not self.hwnd:
             self.hwnd = int(self.root.wm_frame(), 16)
             self.rounded = _style_window(self.hwnd, self.c['rule'])
+            if self.c.get('tint'):
+                # Glass set before Windows made the window does not take: apply it while hidden, then show
+                # again (the same order that works when Glass is switched on later)
+                self.root.withdraw()
+                self.root.attributes('-transparentcolor', '')
+                self.root.attributes('-transparentcolor', self.c['card'])
+                _glass(self.hwnd, self.c['tint'])
+                self.root.deiconify()
+                self.root.lift()
+                self.root.update_idletasks()
             if self.c.get('tint') and not _glass(self.hwnd, self.c['tint']):
                 self._tname = None                                   # retry as Paper
                 self._look = lambda: 'paper'
@@ -762,6 +775,8 @@ class QuickBar:
             return
         cur = self._current() if keep else None
         self._rows, self._q_shown, self._sel = rows, q, 0
+        if not q and self._mode == 'search':
+            self._sel = -1                          # recent files: nothing chosen, nothing previewed yet
         if cur in rows:
             self._sel = rows.index(cur)
         self._layout()
@@ -1084,6 +1099,8 @@ class QuickBar:
         cv.create_line(x0, y0, x0, y1, fill=c['rule'])
         r = self._current()
         if not r:
+            cv.create_text((x0 + x1) // 2, (y0 + y1) // 2, text='Choose a file to preview it', fill=c['muted'],
+                           font=self.f_small)
             return
         px, pad = self._pv_box(), p(16)
         bx, by = x0 + pad, y0 + pad
@@ -1136,7 +1153,7 @@ class QuickBar:
             meta.append(d['meta'])
         elif r.get('cat') != 'folder' and r.get('size') is not None:
             meta.append(_size(int(r['size'])))
-        if r.get('mtime'):
+        if (r.get('mtime') or 0) > 315619200:          # before 2 Jan 1980 = no real date
             meta.append(time.strftime('%d %b %Y, %H:%M', time.localtime(int(r['mtime']))))
         if r.get('online'):
             meta.append('online only')
@@ -1218,8 +1235,11 @@ class QuickBar:
 
     # ── input ────────────────────────────────────────────────────────────
     def _move(self, d):
+        if (self._mode == 'image' and d == 1 and self._rows and self._rows[0].get('action') == 'pick'):
+            self._pick_image()                       # ↓ in image mode: straight to the file chooser
+            return 'break'
         if self._rows:
-            self._sel = (self._sel + d) % len(self._rows)
+            self._sel = (0 if d > 0 else len(self._rows) - 1) if self._sel < 0 else (self._sel + d) % len(self._rows)
             self._paint()
             self._want_preview()
         return 'break'
@@ -1254,7 +1274,7 @@ class QuickBar:
             self._act(self._open_path)
 
     def _current(self):
-        return self._rows[self._sel] if self._rows and self._sel < len(self._rows) else None
+        return self._rows[self._sel] if self._rows and 0 <= self._sel < len(self._rows) else None
 
     def _help(self):
         self.var.set('?')

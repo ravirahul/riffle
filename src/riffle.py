@@ -1420,7 +1420,7 @@ class Engine:
             hist = {'time': [], 'size': [], 'tmin': 0, 'tmax': 0}
             if sel.size:
                 mt = ix.mtime[sel]
-                mt = mt[mt > 0]
+                mt = mt[mt > 315619200]        # 0 / 1 Jan 1980 = no real date: the graph starts at the oldest real one
                 if mt.size:
                     lo, hi = int(mt.min()), int(mt.max())
                     if hi <= lo:

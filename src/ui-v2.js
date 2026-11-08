@@ -12,8 +12,9 @@ const SVG = {
   list:'<svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
   table:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M3 15h18M9 4v16"/></svg>',
 };
+const NO_DATE = 315619200;                   // 2 Jan 1980: anything earlier is "no date" (zip/DOS default)
 const rel = t => {
-  if (!t) return "";
+  if (!t || t < NO_DATE) return "—";
   const s = Date.now() / 1000 - t, d = new Date(t * 1000);
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)} min ago`;
@@ -57,11 +58,6 @@ $(".main").insertAdjacentHTML("afterbegin", `
     <button class="chip" data-f="all">All</button>
     ${TYPES.map(([k, l]) => `<button class="chip" data-f="cat" data-cat2="${k}">${l} <span class="n"></span></button>`).join("")}
     <button class="chip" data-f="folders">Folders</button>
-    <button class="chip dd" data-pop="mTypes">More types</button>
-    <span class="sep" aria-hidden="true"></span>
-    <button class="chip dd" data-pop="mTime" id="ddTime">Any time</button>
-    <button class="chip dd" data-pop="mSize" id="ddSize">Any size</button>
-    <button class="chip dd" data-pop="mWhere" id="ddWhere">Anywhere</button>
     <span class="sp"></span>
     <label class="sr" for="v2sort" style="position:absolute;left:-9999px">Sort</label>
     <select id="v2sort" aria-label="Sort">
@@ -86,21 +82,34 @@ document.body.insertAdjacentHTML("beforeend", `
       `<button class="opt2" data-pm="${m}"><span class="dot2"></span><span><b>${b}</b><small>${s}</small></span></button>`).join("")}
     <h4>Also show</h4><div id="aaQs"></div>
   </div>
-  <div class="pop" id="mTypes" role="dialog" aria-label="More types">
-    <h4>Kinds</h4><div class="chips" id="moreCats"></div>
-    <h4>Extensions</h4><div id="mExt"></div>
-  </div>
-  <div class="pop" id="mTime" role="dialog" aria-label="Modified"><div id="mTimeIn"></div></div>
-  <div class="pop" id="mSize" role="dialog" aria-label="Size">
-    <div class="chips" id="sizeChips">
+`);
+
+/* filters live in the sidebar as accordions; Modified and Where start open */
+$(".rail .nav").insertAdjacentHTML("afterend", `<div class="acc" aria-label="Filters">
+  <details id="accTime" open><summary><span class="t">Modified</span><span class="v" id="ddTime">Any time</span></summary>
+    <div class="accin" id="mTimeIn"></div></details>
+  <details id="accWhere" open><summary><span class="t">Where</span><span class="v" id="ddWhere">Anywhere</span></summary>
+    <div class="accin" id="mWhereIn"><h4>Only in this folder</h4></div></details>
+  <details id="accSize"><summary><span class="t">Size</span><span class="v" id="ddSize">Any size</span></summary>
+    <div class="accin"><div class="chips" id="sizeChips">
       ${[["", "Any size"], ["0-1048576", "Under 1 MB"], ["1048576-104857600", "1 – 100 MB"],
          ["104857600-1073741824", "100 MB – 1 GB"], ["1073741824-", "Over 1 GB"]].map(([v, l]) =>
         `<button class="chip" data-sz="${v}">${l}</button>`).join("")}
-    </div><div id="mSizeIn"></div>
-  </div>
-  <div class="pop" id="mWhere" role="dialog" aria-label="Where">
-    <h4>Only in this folder</h4><div id="mWhereIn"></div>
-  </div>`);
+    </div><div id="mSizeIn"></div></div></details>
+  <details id="accTypes"><summary><span class="t">More types</span><span class="v" id="ddTypes">All</span></summary>
+    <div class="accin"><h4>Kinds</h4><div class="chips" id="moreCats"></div><h4>Extensions</h4><div id="mExt"></div></div></details>
+  <button class="clear2" id="v2clear" hidden>Clear all filters</button>
+</div>`);
+$("#v2clear").onclick = () => {
+  $("#clearAll").click();
+  $$("#sizeChips .chip").forEach(c => c.setAttribute("aria-pressed", "false"));
+  setTimeout(syncChips);
+};
+try{ const o = JSON.parse(localStorage.getItem("riffle.v2.acc") || "{}");
+     for (const [id, on] of Object.entries(o)) if ($("#" + id)) $("#" + id).open = on; }catch(e){}
+$$(".acc details").forEach(d => d.addEventListener("toggle", () => {
+  try{ localStorage.setItem("riffle.v2.acc", JSON.stringify(Object.fromEntries($$(".acc details").map(x => [x.id, x.open])))); }catch(e){}
+}));
 
 /* move the originals into the menus (ids and listeners come along) */
 $("#mExt").append($("#extField"), $("#extChips"));
@@ -189,10 +198,8 @@ function syncChips(){
   $(".frow [data-f=all]").setAttribute("aria-pressed", !any);
   $(".frow [data-f=folders]").setAttribute("aria-pressed", state.kind === "folders");
   const extra = MORE_CATS.filter(([k]) => state.cats.has(k)).length + state.exts.length + (state.kind === "files" ? 1 : 0);
-  const mt = $(".frow [data-pop=mTypes]");
-  mt.textContent = extra ? `More types · ${extra}` : "More types";
-  mt.classList.toggle("on", !!extra);
   const dd = (id, on, label) => { const b = $("#" + id); b.textContent = label; b.classList.toggle("on", on); };
+  dd("ddTypes", !!extra, extra ? `${extra} chosen` : "All");
   const dchip = $$("#dateChips .chip").find(c => c.getAttribute("aria-pressed") === "true");
   dd("ddTime", state.timeMin != null, state.timeMin == null ? "Any time" : dchip ? (dchip.textContent === "Year" ? "This year" : "Last " + dchip.textContent.replace("Today", "day").replace(" days", " days")) : $("#tLabel").textContent);
   const sz = $$("#sizeChips .chip").find(c => c.getAttribute("aria-pressed") === "true" && c.dataset.sz);
@@ -200,6 +207,8 @@ function syncChips(){
   const where = state.scope ? "In " + state.scope.split("\\").filter(Boolean).pop() : state.exclude ? "Not in " + state.exclude : state.cloud ? "Cloud" : "Anywhere";
   dd("ddWhere", !!(state.scope || state.exclude || state.cloud), where);
   $("#aaBtn").classList.toggle("on", state.mode !== "substring");
+  $("#v2clear").hidden = !(any || extra || state.timeMin != null || state.sizeMin != null || state.sizeMax != null
+                           || state.scope || state.exclude || state.cloud);
 }
 paintFacets = (orig => function(c){ orig(c); syncChips(); syncMoreCats(); })(paintFacets);
 $("#dateChips").addEventListener("click", () => setTimeout(syncChips));
@@ -278,7 +287,11 @@ $("#inote").addEventListener("click", e => {
   const b = e.target.closest("[data-in]"); if (!b) return;
   document.querySelector(`.seg [data-mode="${b.dataset.in === "inside" ? "content" : "substring"}"]`)?.click();
 });
-runSearch = (orig => async function(){ await orig(); inote(); syncChips(); })(runSearch);
+runSearch = (orig => async function(){
+  await orig();
+  if (!state.q.trim() && state.sel >= 0){ state.sel = -1; state.anchor = -1; render(); showPreview(true); }  // nothing chosen yet: no preview
+  inote(); syncChips();
+})(runSearch);
 
 /* ── 5. start screen ─────────────────────────────────────────────────────── */
 $("#scroll").insertAdjacentHTML("beforebegin", `<div id="home" aria-label="Start">
@@ -361,7 +374,7 @@ $(".main").insertAdjacentHTML("beforeend", `
     <h2>Find the original of a picture</h2>
     <p>Drop a picture or video here, paste one with <b>Ctrl+V</b>, or choose a file. Riffle finds where the original lives,
       other copies, and pictures that look alike, even after crops, filters or resizing.</p>
-    <div class="row3"><button class="btn ink big" id="imgChoose">Choose a file…</button></div></div></div>
+    <div class="row3"><button class="btn ink big" id="imgChoose">Choose a file… <kbd class="kb">↓</kbd></button></div></div></div>
   <div class="mpanel" id="voicePanel"><div class="drop">${SVG.mic}<h2 id="vpTitle">Voice search</h2><p id="vpText"></p>
     <div class="row3" id="vpBtns"></div></div></div>`);
 $("#imgChoose").onclick = () => $("#visFile").click();
@@ -380,6 +393,9 @@ function setQMode(m){
 }
 $(".qmodes").addEventListener("click", e => { const b = e.target.closest("[data-qm]"); if (b) setQMode(b.dataset.qm); });
 $("#q").addEventListener("keydown", e => {
+  if (qmode === "image" && (e.key === "ArrowDown" || e.key === "Enter")){   // quickest way to pick a picture
+    e.preventDefault(); e.stopPropagation(); $("#visFile").click(); return;
+  }
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   if ($("#q").value && qmode === "search") return;            // normal cursor movement
   e.preventDefault();
@@ -505,6 +521,59 @@ $("#pvInfo").addEventListener("click", e => {
   const d = e.target.closest("[data-v2dots]");
   if (d){ const r = d.getBoundingClientRect(); openMenu(r.left - 160, r.bottom + 4); }
 });
+
+/* ── 8. Settings › Guide: how everything works, in one place ─────────────── */
+const GUIDE_ICO = '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2zM4 5v16M8 7h7M8 11h5"/></svg>';
+const k = s => `<kbd class="kb">${s}</kbd>`;
+TABS.splice(TABS.findIndex(t => t[0] === "general") + 1, 0, ["guide", "Guide"]);    // the dialog's title comes from TABS
+ICO.guide = GUIDE_ICO;
+document.querySelector('#set [data-tab="general"]').insertAdjacentHTML("afterend",
+  `<button role="tab" data-tab="guide" aria-selected="false">${GUIDE_ICO}Guide</button>`);
+document.querySelector("#sp-general").insertAdjacentHTML("afterend", `<div class="set-pane guide" id="sp-guide" role="tabpanel" hidden>
+  <h2>How to use Riffle</h2>
+  <p class="lede2">Everything below works offline. Nothing leaves your PC unless you choose a web search.</p>
+
+  <h3>Search from anywhere</h3>
+  <ul>
+    <li>Press ${k("Ctrl")} ${k("Shift")} ${k("Space")} in any app. The quick bar opens over whatever you are doing.</li>
+    <li>Type part of a name. The best match comes first as <b>Top hit</b>, then <b>Apps</b>, <b>Settings</b>, <b>Files</b>,
+        <b>Websites</b> from your browser history, and documents with your words <b>inside</b> them.</li>
+    <li>${k("↵")} opens · ${k("Ctrl")} ${k("↵")} shows it in its folder · ${k("Ctrl")} ${k("C")} copies the path ·
+        ${k("Tab")} continues in this window · ${k("Esc")} closes. Type ${k("?")} for examples.</li>
+    <li>Riffle learns what you open, so your usual picks rise to the top.</li>
+  </ul>
+
+  <h3>Three ways to search: Search · Image · Voice</h3>
+  <ul>
+    <li>When the box is empty, press ${k("←")} ${k("→")} (or click the icons in the box) to switch.</li>
+    <li><b>Image</b> finds the original of a picture, other copies and look-alikes. Press ${k("↓")} to choose a file,
+        or ${k("Ctrl")} ${k("V")} to paste a copied picture or screenshot. Set its folders under <b>Visual search</b>.</li>
+    <li><b>Voice</b> types as you speak and searches as you go. Pause when you are done; ${k("Esc")} stops.
+        Add it once under <b>General › Voice search</b> (65 MB, works offline).</li>
+  </ul>
+
+  <h3>What you can type</h3>
+  <ul>
+    <li>A setting: <i>bluetooth</i>, <i>wifi</i>, <i>dark mode</i>, <i>uninstall</i>.</li>
+    <li>A sum: <i>12*(3+4)</i> or <i>18% of 4,500</i>. ${k("↵")} copies the answer.</li>
+    <li>A website: <i>github.com</i> opens it. Shortcuts: <i>yt lofi</i>, <i>g weather</i>, <i>maps cafe</i>, <i>wiki goa</i>.</li>
+  </ul>
+
+  <h3>This window</h3>
+  <ul>
+    <li>The chips under the box narrow by type. The sidebar narrows by <b>Modified</b> date, <b>Where</b>, <b>Size</b> and
+        more types; drag across a graph to pick a range.</li>
+    <li>${k("Aa")} changes how names match (close enough, patterns) and shows hidden and system files.</li>
+    <li><b>List</b> is easy to read; <b>Details</b> is the full table with exact sizes and paths.</li>
+    <li>${k("Space")} shows or hides the preview · ${k("Ctrl")} ${k("D")} switches dark mode · ${k("Ctrl")} ${k("K")} jumps to the box.</li>
+  </ul>
+
+  <h3>Free up space</h3>
+  <ul>
+    <li><b>Duplicates</b> finds exact copies, even renamed ones. One of each is always kept.</li>
+    <li><b>Clean up</b> lists temp files, caches and old installers, each with the reason it is safe. Your files go to the Recycle Bin.</li>
+  </ul>
+</div>`);
 
 /* ── start ───────────────────────────────────────────────────────────────── */
 setListView(view0);
