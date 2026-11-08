@@ -268,3 +268,12 @@ select option,select optgroup{background-color:var(--card);color:var(--ink)}
 .wcard .btn{align-self:flex-start;margin-top:4px}
 .mapnote{margin:-6px 0 10px;font-size:12.5px;color:var(--ink-2)}
 .icard,.tile-s,.fmap .t2{border-radius:var(--r) !important}
+
+/* one line always: the type chips scroll sideways when narrow; sort and views stay on the right */
+.frow{flex-wrap:nowrap}
+.frow .fchips{display:flex;gap:6px;flex:1 1 auto;min-width:0;overflow-x:auto;scrollbar-width:none;
+  -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent)}
+.frow .fchips::-webkit-scrollbar{display:none}
+.frow .fchips .chip{flex-shrink:0}
+.frow #v2sort,.frow .vtog{flex-shrink:0}
+@media (max-width:1100px){.frow .fchips .chip .n{display:none}}

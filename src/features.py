@@ -58,6 +58,7 @@ DEFAULTS = {
     'quickPreview': True,        # quick bar shows a preview of the selected file
     'quickLook': 'paper',        # paper | glass
     'quickTint': 40,             # Glass transparency, 0-100
+    'quickHints': True,          # key hints along the bottom of the quick bar
     'quickStart': 'recent',      # what the empty quick bar shows: empty | recent | last | both
     'quickApps': True,           # quick bar: apps
     'quickSettings': True,       # quick bar: Windows settings pages

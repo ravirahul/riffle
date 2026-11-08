@@ -302,7 +302,8 @@ def _border(hwnd, color):
 class QuickBar:
     def __init__(self, search, open_path, reveal, open_app, icon_png, theme,
                  content=None, picked=None, preview=None, preview_on=None, open_target=None, look=None,
-                 visual=None, clip_image=None, voice_start=None, voice_stop=None, tint=None, start_view=None):
+                 visual=None, clip_image=None, voice_start=None, voice_stop=None, tint=None, start_view=None,
+                 hints=None, set_hints=None):
         self._search, self._open_path, self._reveal = search, open_path, reveal
         self._open_app, self._icon_png, self._theme = open_app, icon_png, theme
         self._content, self._picked = content, picked            # text-inside search, "you opened this"
@@ -314,6 +315,8 @@ class QuickBar:
         self._tint = tint or (lambda: 40)                         # Glass transparency 0-100
         self._start_view = start_view or (lambda: 'recent')       # empty | recent | last | both
         self._sv, self._last_q = 'recent', ''
+        self._hints, self._set_hints = hints or (lambda: True), set_hints   # the key-hint row at the bottom
+        self._hint_note, self._foot_hit = False, None
         self._listening, self._lvl, self._phase = False, 0.0, 0
         self._lvls = deque([0.0] * 36, maxlen=36)
         self._mode_hits, self._more_hits = [], []
@@ -615,7 +618,7 @@ class QuickBar:
         if not src:
             if self._mode == 'image':
                 self._flash = 'No picture copied'
-                self._paint()
+                self._layout()
                 self.root.after(1200, self._unflash)
                 return 'break'
             return None
@@ -938,7 +941,7 @@ class QuickBar:
         elif self._q_shown:
             body = p(ROW)
         w = p(WIDTH) + (p(PREVIEW) if self._pv_show else 0)
-        h = p(HEAD) + 1 + body + 1 + p(FOOT)
+        h = p(HEAD) + 1 + body + 1 + self._foot()
         x0, y0, mw, mh = getattr(self, '_mon', None) or _cursor_monitor()[:4]
         self._paint(w, h)
         top = max(0, min(round(mh * 0.22), mh - h - p(20)))      # tall results move up, never off screen
@@ -996,17 +999,30 @@ class QuickBar:
         for i, r in enumerate(self._rows):
             self._draw_row(i, r, tops[i], lw)
         if self._pv_show and self._rows:
-            self._draw_preview(lw, p(HEAD) + 1, w, h - p(FOOT))
-        # footer
-        fy = h - p(FOOT)
+            self._draw_preview(lw, p(HEAD) + 1, w, h - self._foot())
+        # footer: key hints (can be hidden), or a short note
+        self._foot_hit = None
+        fh = self._foot()
+        if not fh:
+            self._draw_voice()
+            return
+        fy = h - fh
         cv.create_line(0, fy, w, fy, fill=c['rule'])
         cv.create_rectangle(0, fy + 1, w, h, fill=c['paper'], outline='')
-        x, my = p(18), fy + p(FOOT) // 2
-        for k, label in MODE_HINTS.get(self._mode, HINTS):
-            t = cv.create_text(x, my, text=k, anchor='w', fill=c['ink2'], font=self.f_key)
-            x = cv.bbox(t)[2] + p(5)
-            t = cv.create_text(x, my, text=label, anchor='w', fill=c['muted'], font=self.f_small)
-            x = cv.bbox(t)[2] + p(16)
+        x, my = p(18), fy + fh // 2
+        if self._hint_note:
+            cv.create_text(x, my, text='Hints hidden. Show them again in Settings › Quick bar, or type ? for the guide.',
+                           anchor='w', fill=c['ink2'], font=self.f_small)
+        elif self._hints_on():
+            for k, label in MODE_HINTS.get(self._mode, HINTS):
+                t = cv.create_text(x, my, text=k, anchor='w', fill=c['ink2'], font=self.f_key)
+                x = cv.bbox(t)[2] + p(5)
+                t = cv.create_text(x, my, text=label, anchor='w', fill=c['muted'], font=self.f_small)
+                x = cv.bbox(t)[2] + p(16)
+            if not self._flash and self._set_hints:          # ✕ hides the hints
+                cx = w - p(20)
+                cv.create_text(cx, my, text='✕', fill=c['muted'], font=self.f_small)
+                self._foot_hit = (cx - p(12), fy, cx + p(12), h)
         if self._flash:
             tw = self.f_key.measure(self._flash)
             cv.create_rectangle(w - p(18) - tw - p(14), my - p(10), w - p(18), my + p(10),
@@ -1231,6 +1247,23 @@ class QuickBar:
             d[key] = img.subsample(f)
         return d[key]
 
+    def _hints_on(self):
+        return self._safe(self._hints) is not False
+
+    def _foot(self):
+        return self._px(FOOT) if (self._hints_on() or self._hint_note or self._flash) else 0
+
+    def _hide_hints(self):
+        self._safe(self._set_hints, False)
+        self._hint_note = True
+        self._layout()
+
+        def done():
+            self._hint_note = False
+            if self.shown:
+                self._layout()
+        self.root.after(5000, done)
+
     def _round_rect(self, x1, y1, x2, y2, rad, fill):
         pts = [x1 + rad, y1, x2 - rad, y1, x2, y1, x2, y1 + rad, x2, y2 - rad, x2, y2,
                x2 - rad, y2, x1 + rad, y2, x1, y2, x1, y2 - rad, x1, y1 + rad, x1, y1]
@@ -1287,6 +1320,9 @@ class QuickBar:
             self._want_preview()
 
     def _click(self, ev):
+        f = self._foot_hit
+        if f and f[0] <= ev.x <= f[2] and f[1] <= ev.y <= f[3]:
+            return self._hide_hints()
         for x1, y1, x2, y2, m in self._mode_hits:
             if x1 <= ev.x <= x2 and y1 <= ev.y <= y2:
                 self._set_mode(m)
@@ -1378,12 +1414,12 @@ class QuickBar:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self._flash = 'Copied'
-        self._paint()
+        self._layout()
         self.root.after(900, self._unflash)
 
     def _unflash(self):
         self._flash = None
-        self._paint()
+        self._layout()
 
 
 if __name__ == '__main__':

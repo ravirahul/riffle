@@ -56,10 +56,11 @@ const TYPES = [["document", "Documents"], ["image", "Pictures"], ["video", "Vide
 const MORE_CATS = [["code", "Code"], ["archive", "Archives"], ["other", "Other"]];
 $(".main").insertAdjacentHTML("afterbegin", `
   <div class="frow" role="toolbar" aria-label="Filters">
-    <button class="chip" data-f="all">All</button>
-    ${TYPES.map(([k, l]) => `<button class="chip" data-f="cat" data-cat2="${k}">${l} <span class="n"></span></button>`).join("")}
-    <button class="chip" data-f="folders">Folders</button>
-    <span class="sp"></span>
+    <div class="fchips">
+      <button class="chip" data-f="all">All</button>
+      ${TYPES.map(([k, l]) => `<button class="chip" data-f="cat" data-cat2="${k}">${l} <span class="n"></span></button>`).join("")}
+      <button class="chip" data-f="folders">Folders</button>
+    </div>
     <label class="sr" for="v2sort" style="position:absolute;left:-9999px">Sort</label>
     <select id="v2sort" aria-label="Sort">
       <option value="best">Best match</option><option value="modified">Newest first</option>
@@ -72,6 +73,11 @@ $(".main").insertAdjacentHTML("afterbegin", `
     </div>
   </div>
   <div class="inote" id="inote" role="status"></div>`);
+
+$(".fchips").addEventListener("wheel", e => {             // a vertical wheel scrolls the chips sideways
+  const f = e.currentTarget;
+  if (f.scrollWidth > f.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)){ f.scrollLeft += e.deltaY; e.preventDefault(); }
+}, { passive:false });
 
 /* menus */
 document.body.insertAdjacentHTML("beforeend", `
@@ -248,9 +254,10 @@ $("#v2sort").onchange = e => {
 };
 
 /* ── 3. List / Details ───────────────────────────────────────────────────── */
-const GRID = { w:172, h:184, gap:12, pad:14 };
+const GRID = { w:160, h:184, gap:12, pad:14 };      // w = smallest card; cards stretch to fill the row
 let view = "list";
 const gridCols = () => Math.max(1, Math.floor(($("#scroll").clientWidth - GRID.pad * 2 + GRID.gap) / (GRID.w + GRID.gap)));
+const cardW = cols => Math.floor(($("#scroll").clientWidth - GRID.pad * 2 - GRID.gap * (cols - 1)) / cols);
 function setListView(v){
   view = ["list", "grid", "details"].includes(v) ? v : "list";
   document.body.classList.toggle("v2list", view === "list");
@@ -266,7 +273,7 @@ $(".vtog").addEventListener("click", e => { const b = e.target.closest("[data-v2
 
 /* grid: cards in rows of N, only the visible ones built (same virtual list, same .row[data-i] events) */
 function renderGrid(){
-  const sc = $("#scroll"), rowsEl = $("#rows"), cols = gridCols(), rh = GRID.h + GRID.gap;
+  const sc = $("#scroll"), rowsEl = $("#rows"), cols = gridCols(), cw = cardW(cols), rh = GRID.h + GRID.gap;
   $("#spacer").style.height = (Math.ceil(state.total / cols) * rh + GRID.pad * 2) + "px";
   $("#empty").style.display = state.total ? "none" : "flex";
   if (!state.total){ rowsEl.innerHTML = ""; return; }
@@ -276,9 +283,9 @@ function renderGrid(){
   let html = "";
   for (let i = first; i < last; i++){
     const page = state.pages.get(Math.floor(i / PAGE)), r = page ? page[i % PAGE] : null;
-    const x = GRID.pad + (i % cols) * (GRID.w + GRID.gap), y = GRID.pad + Math.floor(i / cols) * rh;
+    const x = GRID.pad + (i % cols) * (cw + GRID.gap), y = GRID.pad + Math.floor(i / cols) * rh;
     const sel = (i === state.sel || state.marked.has(i)) ? " sel" : "";
-    const pos = `left:${x}px;top:${y}px;width:${GRID.w}px;height:${GRID.h}px`;
+    const pos = `left:${x}px;top:${y}px;width:${cw}px;height:${GRID.h}px`;
     if (!r){ html += `<div class="row card skel${sel}" data-i="${i}" style="${pos}"><div class="th"></div></div>`; continue; }
     const p = joinPath(r), pic = r.cat === "image" || r.cat === "video";
     const th = pic ? `<img loading="lazy" src="${fileURL("thumb", p, 256)}" alt="" onerror="this.className='ico3';this.onerror=()=>{this.onerror=null;this.src='${BLANK}'};this.src='${iconURL(r)}'">`

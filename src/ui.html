@@ -876,8 +876,9 @@ function render(){
   rowsEl.innerHTML = html;
 }
 
-$("#scroll").addEventListener("scroll", render, { passive:true });
-window.addEventListener("resize", render);
+// call the current render (later scripts wrap it, e.g. the grid view), not the one defined here
+$("#scroll").addEventListener("scroll", () => render(), { passive:true });
+window.addEventListener("resize", () => render());
 
 /* row interaction */
 $("#rows").addEventListener("click", e => {

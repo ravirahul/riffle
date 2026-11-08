@@ -187,7 +187,8 @@ function paintSettings(){
       + row("Transparency", "How much of what's behind shows through Glass.",
           `<span class="rng"><input type="range" id="sQTint" min="0" max="100" step="5" value="${s.quickTint ?? 40}"
              aria-label="Glass transparency" ${(s.quickLook || "paper") === "glass" ? "" : "disabled"}><output id="sQTintV">${s.quickTint ?? 40}%</output></span>`)
-      + row("Preview beside results", "A picture or the first lines of the selected file.", sw("sQPrev", s.quickPreview !== false)))
+      + row("Preview beside results", "A picture or the first lines of the selected file.", sw("sQPrev", s.quickPreview !== false))
+      + row("Key hints", "The row of shortcuts along the bottom. Type ? in the quick bar for the full guide.", sw("sQHints", s.quickHints !== false)))
     + acc("qaKey", "Hotkey",
       row("Summon hotkey", SV.hotkey.ok ? `Press it anywhere to open Riffle.`
             : `<span class="warn">${esc(keyLabel(s.hotkey))} is already used by another app. Pick another.</span>`,
@@ -287,7 +288,7 @@ $("#set").addEventListener("change", e => {
   const id = e.target.id, v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   const map = { sAnim:"animation", sPrev:"previewOnStart", sUpd:"updates", sSys:"hideSystem", sHid:"hideHidden",
                 sHome:"homeRecent", sHotkey:"hotkey", sQPrev:"quickPreview",
-                sQApps:"quickApps", sQSet:"quickSettings", sQHist:"quickHistory", sQWeb:"quickWeb", sEngine:"searchEngine" };
+                sQApps:"quickApps", sQHints:"quickHints", sQSet:"quickSettings", sQHist:"quickHistory", sQWeb:"quickWeb", sEngine:"searchEngine" };
   if (map[id]) return saveSetting({ [map[id]]:v });
   if (id === "sAuto") return saveSetting({}, { autostart:v });
   if (id === "sQTint") return saveSetting({ quickTint:+v });

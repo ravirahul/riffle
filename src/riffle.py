@@ -2371,6 +2371,8 @@ def start_quickbar(url):
         voice_stop=voice_stop,
         tint=lambda: features.settings().get('quickTint', 40),
         start_view=lambda: features.settings().get('quickStart', 'recent'),
+        hints=lambda: features.settings().get('quickHints', True),
+        set_hints=lambda on: features.save_settings({'quickHints': bool(on)}),
     )
     bar.start()
     if contentsearch.available():
