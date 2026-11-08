@@ -29,8 +29,16 @@ import io
 ImageOps.exif_transpose(Image.open(io.BytesIO(buf.tobytes())).convert('RGB'))
 visual.dhash(Image.new('RGB', (32, 32)))
 
+# voice pack: load the model, decode a second of silence, open the audio library
+import sherpa_onnx
+import sounddevice
+sys.path.insert(0, os.path.join(ROOT, 'src'))
+import voice
+voice.transcribe(os.path.join(ROOT, 'models', 'voice'), np.zeros(16000, dtype=np.float32))
+
 stdlib = sysconfig.get_paths()['stdlib'].lower()
-skip = ('openvino', 'cv2', 'PIL', 'visual', 'openvino_telemetry')
+skip = ('openvino', 'cv2', 'PIL', 'visual', 'openvino_telemetry', 'sherpa_onnx', 'sounddevice', '_sounddevice',
+        'cffi', '_cffi_backend', 'pycparser', 'voice')
 need = set()
 for name, mod in list(sys.modules.items()):
     if name.split('.')[0] in skip or name in before:

@@ -50,6 +50,9 @@ copy
 copyreg
 ctypes
 ctypes._endian
+ctypes._layout
+ctypes.util
+ctypes.wintypes
 dataclasses
 datetime
 dis
@@ -68,7 +71,6 @@ email.message
 email.parser
 email.quoprimime
 email.utils
-encodings.cp1252
 encodings.idna
 enum
 fnmatch

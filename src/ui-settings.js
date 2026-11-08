@@ -183,6 +183,8 @@ function paintSettings(){
     + row("Windows settings in the quick bar", "Pages like Bluetooth, Wi-Fi and Display.", sw("sQSet", s.quickSettings !== false))
     + row("Browser history in the quick bar", "Pages and bookmarks from Chrome, Edge, Brave, Opera, Vivaldi and Firefox. Read on this PC only.", sw("sQHist", s.quickHistory !== false))
     + row("Web search in the quick bar", "Open addresses you type, a search row at the end, and shortcuts: g, yt, maps, wiki.", sw("sQWeb", s.quickWeb !== false))
+    + row("Voice search in the quick bar", "Speak instead of typing: press → in the quick bar. Works offline, nothing is recorded or sent.",
+          voiceCtl())
     + row("Search engine", "", `<select id="sEngine">${[["google", "Google"], ["bing", "Bing"], ["duckduckgo", "DuckDuckGo"]].map(([v, l]) =>
           `<option value="${v}" ${(s.searchEngine || "google") === v ? "selected" : ""}>${l}</option>`).join("")}</select>`)
     + row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
@@ -329,3 +331,27 @@ async function checkInbox(){
 }
 window.addEventListener("focus", checkInbox);
 checkInbox();
+
+/* voice pack: install from Settings, like visual search */
+function voiceCtl(){
+  const v = SV && SV.voicePack;
+  if (v === "installed") return `<span class="muted" id="sVoice">Installed</span>`;
+  if (v && (v.state === "downloading" || v.state === "unpacking")){
+    const pct = v.total ? Math.round(100 * v.got / v.total) : 0;
+    return `<button class="btn" id="sVoice" disabled>${v.state === "unpacking" ? "Unpacking…" : `Downloading ${pct}%`}</button>`;
+  }
+  const err = v && v.state === "error" ? `<div class="warn" style="margin-top:4px">${esc(v.error)}</div>` : "";
+  return `<button class="btn" id="sVoice">Install (65 MB)</button>${err}`;
+}
+async function voiceInstall(){
+  await fetch("/api/voice/install", { method:"POST", headers:{ "Content-Type":"application/json" }, body:"{}" });
+  for (let i = 0; i < 1200; i++){
+    SV = await api("/api/settings"); SET = SV.settings;
+    const b = $("#sVoice");
+    if (b) b.outerHTML = voiceCtl();
+    const v = SV.voicePack;
+    if (v === "installed" || (v && v.state !== "downloading" && v.state !== "unpacking")) break;
+    await new Promise(r => setTimeout(r, 700));
+  }
+}
+$("#set").addEventListener("click", e => { if (e.target.closest("#sVoice:not([disabled])") && e.target.tagName === "BUTTON") voiceInstall(); });

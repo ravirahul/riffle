@@ -7,3 +7,4 @@ models/
 tools/*.code
 tools/*.dis
 tools/*.marshal
+src/freshpc/

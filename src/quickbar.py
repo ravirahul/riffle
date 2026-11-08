@@ -24,7 +24,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import zlib
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from ctypes import wintypes as W
 
 user32 = ctypes.windll.user32
@@ -55,7 +55,12 @@ CAT_DOT = {'document': '#3B6FD8', 'image': '#2E9E5B', 'video': '#8A4FD8', 'audio
            'code': '#1E9AA0', 'archive': '#D8892E', 'folder': '#E0B400', 'app': '#5A5E6B',
            'other': '#9A9488'}
 PER_FILE_ICON = {'exe', 'lnk', 'ico', 'url', 'appref-ms', 'msc', 'cur', 'ani'}
-HINTS = [('?', 'help'), ('↵', 'open'), ('Ctrl+↵', 'show in folder'), ('Ctrl+C', 'copy path'),
+MODES = ('search', 'image', 'voice')
+MODE_HINTS = {
+    'image': [('↵', 'choose a picture'), ('Ctrl+V', 'paste one'), ('← →', 'switch'), ('Esc', 'back')],
+    'voice': [('↵', 'search now'), ('Esc', 'stop'), ('← →', 'switch')],
+}
+HINTS = [('?', 'help'), ('← →', 'image · voice'), ('↵', 'open'), ('Ctrl+↵', 'show in folder'), ('Ctrl+C', 'copy path'),
          ('Tab', 'open in Riffle'), ('Esc', 'close')]
 MAX_ROWS = 11                 # grouped: top hit + groups + inside files + web row
 
@@ -296,12 +301,19 @@ def _border(hwnd, color):
 
 class QuickBar:
     def __init__(self, search, open_path, reveal, open_app, icon_png, theme,
-                 content=None, picked=None, preview=None, preview_on=None, open_target=None, look=None):
+                 content=None, picked=None, preview=None, preview_on=None, open_target=None, look=None,
+                 visual=None, clip_image=None, voice_start=None, voice_stop=None):
         self._search, self._open_path, self._reveal = search, open_path, reveal
         self._open_app, self._icon_png, self._theme = open_app, icon_png, theme
         self._content, self._picked = content, picked            # text-inside search, "you opened this"
         self._open_target = open_target                           # URLs, settings pages, apps
         self._look = look or (lambda: 'paper')                    # 'paper' | 'glass'
+        self._visual, self._clip_image = visual, clip_image       # image mode: rows for a picture
+        self._voice_start, self._voice_stop = voice_start, voice_stop
+        self._mode, self._modal = 'search', False
+        self._listening, self._lvl, self._phase = False, 0.0, 0
+        self._lvls = deque([0.0] * 36, maxlen=36)
+        self._mode_hits, self._more_hits = [], []
         self._preview, self._preview_on = preview, preview_on or (lambda: True)
         self._pv_show = False
         self._pv_jobs, self._cjobs = queue.Queue(), queue.Queue()
@@ -363,7 +375,7 @@ class QuickBar:
                               highlightthickness=0, exportselection=False)
         self._apply_scale(1.0)
         self._apply_theme()
-        self.var.trace_add('write', lambda *_: self._schedule())
+        self.var.trace_add('write', lambda *_: self._typed())
         e = self.entry
         e.bind('<Down>', lambda ev: self._move(1))
         e.bind('<Up>', lambda ev: self._move(-1))
@@ -373,6 +385,10 @@ class QuickBar:
         e.bind('<Tab>', lambda ev: self._to_app())
         e.bind('<Escape>', lambda ev: self._esc())
         e.bind('<F1>', lambda ev: self._help())
+        e.bind('<Left>', lambda ev: self._arrow(-1))
+        e.bind('<Right>', lambda ev: self._arrow(1))
+        e.bind('<Control-v>', self._paste)
+        e.bind('<Control-V>', self._paste)
         e.bind('<Control-c>', self._copy)
         e.bind('<Control-C>', self._copy)
         cv.bind('<Motion>', self._hover)
@@ -454,6 +470,8 @@ class QuickBar:
         self._apply_theme()
         self._pv_show = bool(self._preview) and self._safe(self._preview_on) is not False
         self._mon = (x0, y0, mw, mh)
+        if self._mode != 'search':
+            self._set_mode('search', quiet=True)
         if q:
             self.var.set(q)             # traces schedule the search
         else:
@@ -479,13 +497,219 @@ class QuickBar:
         self.last_show_ms = (time.perf_counter() - t0) * 1000
 
     def _hide(self):
+        if self._listening:
+            self._safe(self._voice_stop)
+            self._listening = False
         if self.shown:
             self.shown = False
             self.root.withdraw()
 
     def _check_focus(self):
-        if self.shown and user32.GetForegroundWindow() != self.hwnd:
+        if self.shown and not self._modal and user32.GetForegroundWindow() != self.hwnd:
             self._hide()
+
+    # ── modes: search, image, voice ──────────────────────────────────────
+    def _typed(self):
+        if self._mode == 'image' and self.var.get().strip():
+            self._mode = 'search'                    # typing in image mode means a normal search
+        self._schedule()
+
+    def _arrow(self, d):
+        """← → switch modes when the box is empty (or in image/voice); otherwise move the cursor."""
+        if self.var.get() and self._mode == 'search':
+            return None
+        self._set_mode(MODES[(MODES.index(self._mode) + d) % len(MODES)])
+        return 'break'
+
+    def _set_mode(self, mode, quiet=False):
+        if self._listening and mode != 'voice':
+            self._safe(self._voice_stop)
+            self._listening = False
+        self._mode = mode
+        if quiet:
+            return
+        if mode == 'search':
+            self._schedule(0)
+        elif mode == 'image':
+            self.var.set('')
+            self._mode = 'image'
+            self._set_rows(self._image_intro())
+        else:
+            self._voice_go()
+        self.entry.focus_set()
+
+    def _set_rows(self, rows, q='\x00'):
+        self._seq += 1                              # results still on their way are now stale
+        self._rows, self._sel, self._q_shown = rows, 0, q
+        self._layout()
+        self._want_preview()
+
+    @staticmethod
+    def _note(name, sub, glyph='i', group=None, **kw):
+        return dict(kind='help', name=name, dir=sub, title=name, about=kw.pop('about', sub), glyph=glyph,
+                    group=group, fill=None, path='', **kw)
+
+    # image mode
+    def _image_intro(self):
+        g = 'Find the original of a picture'
+        return [self._note('Choose a picture or video…', 'From this PC: finds the original, other copies and look-alikes',
+                           '+', g, action='pick', about='Riffle finds where the original lives, even after crops, '
+                           'filters or resizing, plus other copies and pictures that look alike.'),
+                self._note('Paste from the clipboard', 'Ctrl+V: a copied picture, screenshot or file', '⎘', g,
+                           action='paste', about='Copy a picture in any app (or press Win+Shift+S for a '
+                           'screenshot), then press Ctrl+V here.')]
+
+    def _pick_image(self):
+        from tkinter import filedialog
+        self._modal = True
+        try:
+            path = filedialog.askopenfilename(parent=self.root, title='Find the original of…', filetypes=[
+                ('Pictures and videos', '*.jpg *.jpeg *.png *.webp *.heic *.gif *.bmp *.tif *.tiff *.avif '
+                                        '*.mp4 *.mov *.mkv *.avi *.webm *.m4v'), ('All files', '*.*')])
+        finally:
+            self._modal = False
+            if self.hwnd:
+                _force_foreground(self.hwnd)
+                self.entry.focus_force()
+        if path:
+            self._image_search(path)
+
+    def _paste(self, ev=None):
+        if self._mode != 'image' and not (self._mode == 'search' and not self.var.get()):
+            return None                              # ordinary text paste
+        src = self._safe(self._clip_image) if self._clip_image else None
+        if not src:
+            if self._mode == 'image':
+                self._flash = 'No picture copied'
+                self._paint()
+                self.root.after(1200, self._unflash)
+                return 'break'
+            return None
+        self._mode = 'image'
+        self._image_search(src)
+        return 'break'
+
+    def _image_search(self, src):
+        self._set_rows([self._note('Looking for the original…', 'The first search loads the picture model, '
+                                   'so it takes a few seconds', '…', 'Find the original of a picture')], '\x00')
+        seq = self._seq
+
+        def run():
+            try:
+                rows, err = self._visual(src) if self._visual else [], None
+            except Exception as e:
+                rows, err = [], str(e)
+            self._call(self._image_done, seq, rows, err)
+        threading.Thread(target=run, daemon=True, name='quickbar-image').start()
+
+    def _image_done(self, seq, rows, err):
+        if seq != self._seq or self._mode != 'image':
+            return
+        if err:
+            rows = [self._note(err.split('. ')[0] + '.', 'Enter opens Riffle', '!', 'Find the original of a picture',
+                               app=True, about=err)]
+        elif not rows:
+            rows = [self._note('No match on this PC', 'Nothing in your visual-search folders looks like it', '?',
+                               'Find the original of a picture', about='Add the folder that holds the original '
+                               'in Riffle › Settings › Visual search, then try again.', app=True)]
+        self._set_rows(rows, '\x00')
+
+    # voice mode
+    def _voice_go(self):
+        self.var.set('')
+        self._mode = 'voice'
+        g = 'Voice search'
+        if not self._voice_start:
+            return self._set_rows([self._note('Voice search is not set up', 'Enter opens Riffle', '!', g, app=True)])
+        err = self._safe(self._voice_start, self._on_voice_text, self._on_voice_level, self._on_voice_end)
+        if err:
+            return self._set_rows([self._note(err.split('. ')[0] + '.', 'Enter opens Riffle to add it', '!', g,
+                                              app=True, about=err)])
+        self._listening = True
+        self._lvls.extend([0.0] * self._lvls.maxlen)
+        self._set_rows([self._note('Speak now', 'Words appear as you talk. Pause when you are done.', '●', g,
+                                   about='Speech is turned into text on this PC. Nothing is recorded or sent.')])
+        self._anim()
+
+    def _on_voice_level(self, level):                # audio thread: just store it
+        self._lvl = level
+
+    def _on_voice_text(self, text, final):
+        self._call(self._voice_text, text, final)
+
+    def _on_voice_end(self, err):
+        self._call(self._voice_end, err)
+
+    def _voice_text(self, text, final):
+        if self._mode != 'voice':
+            return
+        if text and text != self.var.get():
+            self.var.set(text)                       # the search runs as you speak
+            self.entry.icursor('end')
+        if final:
+            self._listening = False
+            if text:
+                self._mode = 'search'
+            else:
+                self._set_rows([self._note("Didn't catch that", 'Press Enter to try again', '↻', 'Voice search',
+                                           action='voice')])
+            self._paint()
+
+    def _voice_end(self, err):
+        self._listening = False
+        if err and self._mode == 'voice':
+            self._set_rows([self._note('The microphone did not start', err[:90], '!', 'Voice search',
+                                       about='Check that a microphone is connected and that Windows › Settings › '
+                                       'Privacy & security › Microphone allows desktop apps.')])
+        if self.shown and self.hwnd:
+            _border(self.hwnd, self.c['rule'])
+            self._paint()
+
+    def _anim(self):
+        """About 30 frames a second, only while listening: the level graph and the listening border."""
+        if not self._listening or not self.shown:
+            return
+        prev = self._lvls[-1]
+        self._lvls.append(prev * 0.45 + self._lvl * 0.55)
+        self._phase += 1
+        self._draw_voice()
+        self.root.after(33, self._anim)
+
+    @staticmethod
+    def _mix(a, b, t):
+        a, b = int(a[1:], 16), int(b[1:], 16)
+        ch = [round(((a >> k) & 255) * (1 - t) + ((b >> k) & 255) * t) for k in (16, 8, 0)]
+        return '#%02X%02X%02X' % tuple(ch)
+
+    def _draw_voice(self):
+        cv, c, p = self.cv, self.c, self._px
+        cv.delete('voice')
+        if self._mode != 'voice' or not self._listening:
+            return
+        w, h, hy = cv.winfo_width(), cv.winfo_height(), p(HEAD) // 2
+        lvl = self._lvls[-1]
+        # level graph: newest on the right, mirrored around the middle line, older bars fade
+        x1 = self._viz[1]
+        n, bw, gap = len(self._lvls), p(3), p(3)
+        for i, v in enumerate(self._lvls):
+            wob = 0.08 * (1 + math.sin(self._phase * 0.22 + i * 0.55))      # breathing while quiet
+            hh = max(p(2), (max(v, wob) ** 0.8) * p(19))
+            x = x1 - (n - 1 - i) * (bw + gap)
+            col = self._mix(c['rule'], c['mark'], 0.25 + 0.75 * (i / (n - 1)))
+            cv.create_line(x, hy - hh, x, hy + hh, fill=col, width=bw, capstyle='round', tags='voice')
+        # mic glyph with a ring that grows with your voice
+        gx, gy = p(22), hy
+        ring = p(9) + lvl * p(7)
+        cv.create_oval(gx - ring, gy - ring, gx + ring, gy + ring, outline=self._mix(c['card'], c['mark'], 0.4 + 0.6 * lvl),
+                       width=p(2), tags='voice')
+        # listening border: a soft pulse, brighter when you talk
+        t = 0.5 + 0.5 * math.sin(self._phase * 0.16)
+        edge = self._mix(c['rule'], c['mark'], min(1.0, 0.35 + 0.35 * t + 0.6 * lvl))
+        for k, wgt in ((1, 1.0), (3, 0.45)):
+            cv.create_rectangle(p(k), p(k), w - p(k) - 1, h - p(k) - 1, outline=self._mix(c['card'], edge, wgt),
+                                width=p(2), tags='voice')
+        if self._phase % 3 == 0 and self.hwnd:
+            _border(self.hwnd, edge)
 
     # ── search ───────────────────────────────────────────────────────────
     def _schedule(self, delay=25):
@@ -495,6 +719,8 @@ class QuickBar:
 
     def _fire(self):
         self._debounce = None
+        if self._mode != 'search' and not (self._mode == 'voice' and self.var.get().strip()):
+            return                                   # image/voice show their own rows
         self._seq += 1
         q = self.var.get().strip()
         self._jobs.put((self._seq, q))
@@ -652,7 +878,7 @@ class QuickBar:
         for r in self._rows:
             g = r.get('group') or (None if self._q_shown else 'Recent')
             if g and g != prev:
-                labels.append((y, g.upper()))
+                labels.append((y, g.upper(), r.get('more') or 0))
                 y += p(LABEL)
             prev = g
             tops.append(y)
@@ -685,20 +911,42 @@ class QuickBar:
         # header: glyph, entry, tag
         hy = p(HEAD) // 2
         gx, gr = p(22), p(6.5)
-        cv.create_oval(gx - gr, hy - gr - p(2), gx + gr, hy + gr - p(2), outline=c['muted'], width=p(1.8))
-        cv.create_line(gx + gr * .72, hy + gr * .72 - p(2), gx + p(11), hy + p(9) - p(2) + p(2),
-                       fill=c['muted'], width=p(2), capstyle='round')
+        if self._mode == 'voice':
+            self._glyph_mic(gx, hy, c['ink'] if self._listening else c['muted'])
+        elif self._mode == 'image':
+            self._glyph_image(gx, hy, c['muted'])
+        else:
+            cv.create_oval(gx - gr, hy - gr - p(2), gx + gr, hy + gr - p(2), outline=c['muted'], width=p(1.8))
+            cv.create_line(gx + gr * .72, hy + gr * .72 - p(2), gx + p(11), hy + p(9) - p(2) + p(2),
+                           fill=c['muted'], width=p(2), capstyle='round')
         self._draw_tag(w - p(18), hy)
+        mx = self._draw_modes(w - p(118), hy)          # search · image · voice, left of the tag
+        right = mx - p(10)
+        if self._mode == 'voice' and self._listening:
+            self._viz = (right - p(214), right)
+            right -= p(224)
         if keep is None:   # created once: re-creating it would steal focus from the entry
             self._ewin = cv.create_window(0, 0, window=self.entry, anchor='w')
         cv.coords(self._ewin, p(42), hy)
-        cv.itemconfigure(self._ewin, width=w - p(42) - p(104), height=p(34))
+        hint = self._mode != 'search' and not self.var.get()       # Tk entries have no placeholder:
+        cv.itemconfigure(self._ewin, width=p(10) if hint else max(p(80), right - p(42)), height=p(34))
+        if hint:                                                    # shrink it, write the hint beside the caret
+            ph = 'Listening…' if self._listening else 'Voice search' if self._mode == 'voice' \
+                else 'Find the original of a picture'
+            cv.create_text(p(56), hy, text=ph, anchor='w', fill=c['muted'], font=self.f_q)
         cv.create_line(0, p(HEAD), w, p(HEAD), fill=c['rule'])
         # body
         tops, labels, _ = self._row_tops()
-        for ly, text in labels:
+        lw0 = p(WIDTH) if self._pv_show else w
+        self._more_hits = []
+        for ly, text, more in labels:
             cv.create_text(p(20), ly + p(LABEL) // 2 + p(2), text=text, anchor='w',
                            fill=c['muted'], font=self.f_tag)
+            if more:                                # "+45 more": the rest is one Tab away
+                t = cv.create_text(lw0 - p(20), ly + p(LABEL) // 2 + p(2), text=f'+{more:,} more  ›', anchor='e',
+                                   fill=c['ink2'], font=self.f_tag)
+                b = cv.bbox(t)
+                self._more_hits.append((b[0] - p(6), ly, b[2] + p(6), ly + p(LABEL)))
         if not self._rows and self._q_shown:
             cv.create_text(p(20), p(HEAD) + 1 + p(ROW) // 2, text='No files named like that',
                            anchor='w', fill=c['muted'], font=self.f_name)
@@ -712,7 +960,7 @@ class QuickBar:
         cv.create_line(0, fy, w, fy, fill=c['rule'])
         cv.create_rectangle(0, fy + 1, w, h, fill=c['paper'], outline='')
         x, my = p(18), fy + p(FOOT) // 2
-        for k, label in HINTS:
+        for k, label in MODE_HINTS.get(self._mode, HINTS):
             t = cv.create_text(x, my, text=k, anchor='w', fill=c['ink2'], font=self.f_key)
             x = cv.bbox(t)[2] + p(5)
             t = cv.create_text(x, my, text=label, anchor='w', fill=c['muted'], font=self.f_small)
@@ -723,6 +971,52 @@ class QuickBar:
                                 fill=c['mark'], outline='')
             cv.create_text(w - p(18) - p(7), my, text=self._flash, anchor='e',
                            fill=c['mark_ink'], font=self.f_key)
+        self._draw_voice()
+
+    def _draw_modes(self, right, cy):
+        """Search · Image · Voice buttons, current one highlighted. Returns their left edge."""
+        cv, c, p = self.cv, self.c, self._px
+        size, gap = p(30), p(4)
+        x = right - 3 * size - 2 * gap
+        left = x
+        self._mode_hits = []
+        for m in MODES:
+            on = m == self._mode
+            if on:
+                self._round_rect(x, cy - size // 2, x + size, cy + size // 2, p(8), c['sel'])
+            col = c['ink'] if on else c['muted']
+            mx, my = x + size // 2, cy
+            if m == 'search':
+                r = p(5)
+                cv.create_oval(mx - r - p(1), my - r - p(1), mx + r - p(1), my + r - p(1), outline=col, width=p(1.6))
+                cv.create_line(mx + r * .6, my + r * .6, mx + p(6), my + p(6), fill=col, width=p(1.8), capstyle='round')
+            elif m == 'image':
+                self._glyph_image(mx, my, col, small=True)
+            else:
+                self._glyph_mic(mx, my, col, small=True)
+            self._mode_hits.append((x, cy - size // 2, x + size, cy + size // 2, m))
+            x += size + gap
+        return left
+
+    def _glyph_image(self, cx, cy, col, small=False):
+        cv, p = self.cv, self._px
+        k = 0.85 if small else 1.0                      # a framed picture: sun and a mountain
+        x0, y0, x1, y1 = cx - p(8 * k), cy - p(6.5 * k), cx + p(8 * k), cy + p(6.5 * k)
+        cv.create_rectangle(x0, y0, x1, y1, outline=col, width=p(1.6))
+        r = p(1.8 * k)
+        sx, sy = cx + p(3.5 * k), cy - p(2.5 * k)
+        cv.create_oval(sx - r, sy - r, sx + r, sy + r, fill=col, outline='')
+        cv.create_polygon(x0 + p(1.5), y1 - p(1), cx - p(2.5 * k), cy - p(1 * k), cx + p(1 * k), cy + p(3 * k),
+                          cx + p(3 * k), cy + p(1.5 * k), x1 - p(1.5), y1 - p(1), fill=col, outline='')
+
+    def _glyph_mic(self, cx, cy, col, small=False):
+        cv, p = self.cv, self._px
+        k = 0.8 if small else 1.0
+        bw, bh = p(6 * k), p(10 * k)
+        self._round_rect(cx - bw / 2, cy - bh / 2 - p(3 * k), cx + bw / 2, cy + bh / 2 - p(3 * k), bw / 2, col)
+        cv.create_arc(cx - p(7 * k), cy - p(9 * k), cx + p(7 * k), cy + p(5 * k), start=200, extent=140,
+                      style='arc', outline=col, width=p(1.6))
+        cv.create_line(cx, cy + p(5 * k), cx, cy + p(8 * k), fill=col, width=p(1.6))
 
     def _draw_tag(self, right, cy):
         """The yellow RIFFLE logo: spaced caps on a slightly tilted highlighter."""
@@ -824,7 +1118,7 @@ class QuickBar:
                                anchor='nw', fill=c['ink2'], font=self.f_path)
                 ty += lh
         elif d.get('img'):
-            cv.create_image(bx + inner // 2, by + box_h // 2, image=d['img'])
+            cv.create_image(bx + inner // 2, by + box_h // 2, image=self._fit(d, inner, box_h))
         else:
             img = self._icon(r)
             if img:
@@ -882,6 +1176,17 @@ class QuickBar:
         hint = (d or {}).get('meta') or 'Enter opens it in your browser'
         cv.create_text(bx, y1 - p(16), text=hint, anchor='sw', fill=c['muted'], font=self.f_small)
 
+    def _fit(self, d, w, h):
+        """The preview picture shrunk to fit w x h (cached per size), so it never covers the text."""
+        img = d['img']
+        if img.width() <= w and img.height() <= h:
+            return img
+        key = ('fit', w, h)
+        if key not in d:
+            f = math.ceil(max(img.width() / w, img.height() / h))
+            d[key] = img.subsample(f)
+        return d[key]
+
     def _round_rect(self, x1, y1, x2, y2, rad, fill):
         pts = [x1 + rad, y1, x2 - rad, y1, x2, y1, x2, y1 + rad, x2, y2 - rad, x2, y2,
                x2 - rad, y2, x1 + rad, y2, x1, y2, x1, y2 - rad, x1, y1 + rad, x1, y1]
@@ -935,6 +1240,14 @@ class QuickBar:
             self._want_preview()
 
     def _click(self, ev):
+        for x1, y1, x2, y2, m in self._mode_hits:
+            if x1 <= ev.x <= x2 and y1 <= ev.y <= y2:
+                self._set_mode(m)
+                return
+        for x1, y1, x2, y2 in self._more_hits:
+            if x1 <= ev.x <= x2 and y1 <= ev.y <= y2:
+                self._to_app()
+                return
         i = self._row_at(ev.y, ev.x)
         if i is not None:
             self._sel = i
@@ -950,8 +1263,23 @@ class QuickBar:
 
     def _act(self, fn):
         r = self._current()
+        if self._mode == 'voice' and self._listening:
+            self._safe(self._voice_stop)                  # Enter while talking: search what was heard
+            return 'break'
+        if self._mode == 'image' and not self._rows:
+            self._pick_image()
+            return 'break'
         if r and r.get('kind') == 'help':
-            if r.get('fill') is not None:                 # an example: put it in the box and search it
+            act = r.get('action')
+            if r.get('app'):
+                return self._to_app()
+            if act == 'pick':
+                self._pick_image()
+            elif act == 'paste':
+                self._paste()
+            elif act == 'voice':
+                self._voice_go()
+            elif r.get('fill') is not None:                 # an example: put it in the box and search it
                 self.var.set(r['fill'])
                 self.entry.icursor('end')
         elif r and r.get('calc'):
@@ -978,6 +1306,12 @@ class QuickBar:
         return 'break'
 
     def _esc(self):
+        if self._mode == 'voice' and self._listening:
+            self._safe(self._voice_stop)
+            return 'break'
+        if self._mode != 'search':
+            self._set_mode('search')
+            return 'break'
         if self.var.get():
             self.var.set('')
         else:

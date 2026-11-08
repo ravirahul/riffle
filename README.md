@@ -3,7 +3,8 @@
 Search every file on your Windows PC the moment you think of it, see what's inside without opening it, and get your disk space back.
 
 - **Ctrl + Shift + Space** from anywhere opens Riffle. Results appear as you type, across half a million files in a few milliseconds.
-- **Quick bar**, like Spotlight: files, apps, Windows settings, browser history and bookmarks, sums like `18% of 4,500`, web addresses and a web-search row, all in one box, grouped under a Top hit. It learns what you open, shows words inside your documents (from Windows Search), previews the selected result, and comes in Paper or Glass.
+- **Quick bar**, like Spotlight: files, apps, Windows settings, browser history and bookmarks, sums like `18% of 4,500`, web addresses and a web-search row, all in one box, grouped under a Top hit. It learns what you open, shows words inside your documents (from Windows Search), previews the selected result, and comes in Paper or Glass. Switch between Search, Image (find the original of a picture) and Voice (offline speech-to-text, optional 65 MB pack) with ← →.
+- **A calm window**: a start screen with recent files and what you opened last, one row of filters (type, time, size, place) whose graphs follow your own files, a readable List view and the full Details table, and the same Search · Image · Voice modes.
 - **Preview** with Space: images, video, audio, PDFs, text and code, plus Explorer thumbnails for Office files and anything else Windows can preview.
 - **Duplicates**: finds files with identical contents, even when renamed. One copy of each is always kept.
 - **Clean up**: temp files, browser caches, old installers, forgotten downloads, rebuildable project folders, big old files. Every item says why it's safe. Your files go to the Recycle Bin.

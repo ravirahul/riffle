@@ -1363,7 +1363,9 @@ class Engine:
                     hits = self._raw_hits(q, 'substring')
                 if not hits.size:
                     hits = self._raw_hits(q, 'fuzzy')
-                ids = self._best_order(self._apply(hits, f), q, top=300)[:limit]
+                ids = self._apply(hits, f)
+                self.last_quick_total = int(ids.size)          # "+N more" in the quick bar
+                ids = self._best_order(ids, q, top=300)[:limit]
             return [self._row(int(j), q) for j in ids.tolist()]
 
     # The one call the UI makes for every keystroke.
@@ -1428,8 +1430,12 @@ class Engine:
                     hist['tmin'], hist['tmax'] = lo, hi
                 sz = ix.size[sel]
                 lg = np.log10(np.maximum(sz.astype(np.float64), 1.0))
-                counts, _ = np.histogram(lg, bins=40, range=(0, 11))
+                # the axis runs from the smallest to the biggest file in these results, not a fixed 1 B - 100 GB
+                slo = float(np.floor(lg.min() * 10) / 10) if lg.size else 0.0
+                shi = max(slo + 0.1, float(np.ceil(lg.max() * 10) / 10) if lg.size else 11.0)
+                counts, _ = np.histogram(lg, bins=40, range=(slo, shi))
                 hist['size'] = counts.tolist()
+                hist['slo'], hist['shi'] = slo, shi
 
             # Sorting uses the precomputed ranks, never Python string compares.
             if sel.size and sort == 'best' and (q or '').strip():
@@ -1635,6 +1641,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local():
             return
         path = self.path.split('?')[0]
+        if path == '/api/voice/state':
+            return self._send(200, json.dumps({k: VOICE[k] for k in ('text', 'final', 'listening', 'error', 'seq')}
+                                              | {'levels': VOICE['levels'][-40:],
+                                                 'installed': bool(features.voice_models())}))
+        if path == '/api/picks':
+            n = 100 if 'all=1' in self.path else 8
+            return self._send(200, json.dumps({'items': recent_picks(n)}))
         if features.get(self, path):
             return
         if path == '/api/visual/status':
@@ -1718,6 +1731,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b'{}')
         except Exception:
             return self._send(400, json.dumps({'error': 'bad json'}))
+        if path == '/api/voice/start':
+            return self._send(200, json.dumps(voice_web_start()))
+        if path == '/api/voice/stop':
+            if VOICE['v']:
+                VOICE['v'].stop()
+            return self._send(200, json.dumps({'ok': True}))
         if features.post(self, path, body):
             return
 
@@ -2077,6 +2096,74 @@ def _profile_threads(interval=5.0):
                                               for f in reversed(st)), flush=True)
 
 
+# -- voice: one offline engine shared by the quick bar and the window -------------------
+VOICE = {'v': None, 'text': '', 'final': False, 'listening': False, 'error': None, 'levels': [], 'seq': 0}
+
+
+def voice_engine():
+    models = features.voice_models()
+    if not models:
+        return None
+    if VOICE['v'] is None:
+        import voice as voice_mod
+        VOICE['v'] = voice_mod.Voice(models)
+    return VOICE['v']
+
+
+def voice_web_start():
+    """The window's voice mode: listen, and let the page poll /api/voice/state for words and levels."""
+    v = voice_engine()
+    if not v:
+        return {'installed': False, 'error': 'Voice search is not installed yet. Settings › Quick bar › Voice search adds it.'}
+    if v.busy:
+        v.stop()
+        for _ in range(30):
+            if not v.busy:
+                break
+            time.sleep(0.05)
+    VOICE.update(text='', final=False, listening=True, error=None, levels=[], seq=VOICE['seq'] + 1)
+    seq = VOICE['seq']
+
+    def on_text(text, final):
+        if seq == VOICE['seq']:
+            VOICE['text'] = text
+            VOICE['final'] = VOICE['final'] or final
+
+    def on_level(level):
+        if seq == VOICE['seq']:
+            VOICE['levels'] = (VOICE['levels'] + [round(level, 3)])[-48:]
+
+    def on_end(err):
+        if seq == VOICE['seq']:
+            VOICE.update(listening=False, error=err)
+    v.start(on_text, on_level, on_end)
+    return {'installed': True, 'seq': seq}
+
+
+def recent_picks(n=8):
+    """Files you opened with Riffle, newest first: the window's "Jump back in"."""
+    P = ENGINE.picks
+    with P.lock:
+        items = sorted(P.paths.values(), key=lambda v: -v[2])
+    out = []
+    for path, count, last in items:
+        if len(out) >= n:
+            break
+        if not os.path.isabs(path) or not os.path.exists(path):
+            continue                                   # websites, settings pages, deleted files
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        name, d = os.path.basename(path), os.path.dirname(path)
+        isdir = os.path.isdir(path)
+        ext = '' if isdir else os.path.splitext(name)[1][1:].lower()
+        out.append({'path': path, 'name': name, 'dir': d, 'ext': ext, 'size': 0 if isdir else st.st_size,
+                    'mtime': int(st.st_mtime), 'opened': int(last), 'count': count,
+                    'cat': 'folder' if isdir else CATS[_EXT_CAT.get(ext, CAT_OTHER)]})
+    return out
+
+
 def start_quickbar(url):
     """Create the hidden quick bar (native Tk window) so the hotkey shows it instantly."""
     try:
@@ -2132,12 +2219,87 @@ def start_quickbar(url):
         boosts = {}
         for path, bonus in ENGINE.picks.top_hits(q):
             boosts[path.lower()] = boosts.get(path.lower(), 0) + bonus * 2
-        return sources.compose([
+        rows = sources.compose([
             ('Apps', app_rows),
             ('Settings', setting_rows),
             ('Files', files),
             ('Websites', site_rows),
         ], top_extra=top, last=last, boosts=boosts, max_rows=min(limit, 9))
+        totals = {'Apps': apps.last_total if app_rows else 0,
+                  'Settings': len(sources.settings_rows(q, 999)) if setting_rows else 0,
+                  'Files': getattr(ENGINE, 'last_quick_total', 0) if files else 0,
+                  'Websites': history.last_total if site_rows else 0}
+        for label, total in totals.items():
+            shown = sum(1 for r in rows if label in (r.get('group'), r.get('origin')))
+            first = next((r for r in rows if r.get('group') == label), None)
+            if first and total > shown:
+                first['more'] = total - shown
+        return rows
+
+    def visual_rows(src):
+        """Image mode in the bar: the original, other copies and look-alikes of a picture."""
+        if not features.pro():
+            raise RuntimeError('Visual search is part of Riffle Pro. Enter opens Riffle, where you can try it free')
+        if features.pack_needed():
+            raise RuntimeError('Visual search is not installed yet. Enter opens Riffle to add it (a free download)')
+        v = visual()
+        if not v:
+            raise RuntimeError(_visual['error'] or 'Visual search is still starting, try again in a moment')
+        if isinstance(src, str):
+            with open(src, 'rb') as fh:
+                data = fh.read()
+            ctype = mimetypes.guess_type(src)[0] or ''
+        else:
+            data, ctype = src
+        res = [v.public(r) for r in v.search_bytes(data, ctype)[0]]
+        if not res and (v.status().get('index') or {}).get('running'):
+            raise RuntimeError('Riffle is still reading your pictures. Try again in a moment')
+        orig = [r for r in res if r['original']]
+        vers = [r for r in res if r['match'] == 'verified' and not r['original']]
+        sim = [r for r in res if r['match'] == 'similar'] or ([] if orig else [r for r in res if r['match'] == 'loose'])
+        rows = []
+        for label, items, cap in (('Original', orig, 1), ('Other versions', vers, 3), ('Looks similar', sim, 5)):
+            for i, r in enumerate(items[:cap]):
+                why = ('This exact file' if r['same_file'] else 'Same picture' if r['match'] == 'verified'
+                       else f"{round(r['score'] * 100)}% alike")
+                row = {'kind': 'file', 'name': r['name'], 'dir': f"{why} · {r['w']} × {r['h']} · {r['dir']}",
+                       'path': '' if r.get('link') else r['path'], 'ext': os.path.splitext(r['name'])[1][1:].lower(),
+                       'cat': 'video' if r['kind'] == 'video' else 'image', 'size': r['size'], 'mtime': r['mtime'],
+                       'group': label, 'hl': None}
+                if r.get('link'):
+                    row['target'] = r['link']
+                if i == 0 and len(items) > cap:
+                    row['more'] = len(items) - cap
+                rows.append(row)
+        return rows
+
+    def clip_image():
+        """A copied picture (bytes) or a copied picture file (path), or None."""
+        features.pack_activate()                    # Pillow lives in the visual pack in the light build
+        try:
+            from PIL import ImageGrab
+        except ImportError:
+            return None
+        got = ImageGrab.grabclipboard()
+        if isinstance(got, list):
+            return next((f for f in got if os.path.isfile(f)), None)
+        if got is None:
+            return None
+        buf = io.BytesIO()
+        got.convert('RGB').save(buf, 'PNG')
+        return buf.getvalue(), 'image/png'
+
+    def voice_start(on_text, on_level, on_end):
+        v = voice_engine()
+        if not v:
+            return ('Voice search is not installed yet. Enter opens Riffle: Settings › Quick bar › '
+                    'Voice search adds it (a free 65 MB download)')
+        v.start(on_text, on_level, on_end)
+        return None
+
+    def voice_stop():
+        if VOICE['v']:
+            VOICE['v'].stop()
 
     def open_target(t):
         if isinstance(t, list):
@@ -2203,6 +2365,10 @@ def start_quickbar(url):
         preview=preview,
         preview_on=lambda: features.settings().get('quickPreview', True),
         look=lambda: features.settings().get('quickLook', 'paper'),
+        visual=visual_rows,
+        clip_image=clip_image,
+        voice_start=voice_start,
+        voice_stop=voice_stop,
     )
     bar.start()
     if contentsearch.available():

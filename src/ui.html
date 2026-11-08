@@ -440,6 +440,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
 <link rel="stylesheet" href="/ui/ui-insights.css">
 <link rel="stylesheet" href="/ui/ui-pro.css">
 <link rel="stylesheet" href="/ui/ui-cloud.css">
+<link rel="stylesheet" href="/ui/ui-v2.css">
 </head>
 <body>
 <div id="app">
@@ -560,7 +561,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
             <span id="sLabel">any size</span>
           </div>
           <div class="hist" id="sHist"></div>
-          <div class="axis"><span>1 B</span><button class="reset" id="sReset" hidden>clear</button><span>100 GB</span></div>
+          <div class="axis"><span id="sA">—</span><button class="reset" id="sReset" hidden>clear</button><span id="sB">—</span></div>
         </div>
       </div>
 
@@ -693,13 +694,14 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
 const $ = s => document.querySelector(s);
 const CATS = [["document","Documents"],["image","Images"],["video","Video"],
               ["audio","Audio"],["code","Code"],["archive","Archives"],["other","Other"]];
-const PAGE = 200, ROW = 30, OVER = 12;
+const PAGE = 200, OVER = 12;
+let ROW = 30;                 // 30 in Details view, taller in List view (ui-v2.js)
 
 const state = {
   q:"", mode:"substring", sort:"name", desc:false,
   kind:"all", cats:new Set(), exts:[], scope:"", exclude:"",
   timeMin:null, timeMax:null, sizeMin:null, sizeMax:null,
-  tBrush:null, sBrush:null, tRange:[0,0],
+  tBrush:null, sBrush:null, tRange:[0,0], sRange:[0,11],
   total:0, pages:new Map(), token:0, sel:-1, anchor:-1, marked:new Set(), ready:false,
   gen:-1, live:false
 };
@@ -1065,8 +1067,9 @@ const tH = makeHist($("#tHist"), null, 48, (a, b) => {
 });
 const sH = makeHist($("#sHist"), null, 40, (a, b) => {
   state.sBrush = [a, b];
-  state.sizeMin = Math.pow(10, a * 11 / 40);
-  state.sizeMax = Math.pow(10, (b + 1) * 11 / 40);
+  const [slo, shi] = state.sRange;                 // log10 bytes, from the results themselves
+  state.sizeMin = Math.pow(10, slo + a / 40 * (shi - slo));
+  state.sizeMax = Math.pow(10, slo + (b + 1) / 40 * (shi - slo));
   $("#sReset").hidden = false;
   updateBrushLabels();
   scheduleSearch(0);
@@ -1076,6 +1079,7 @@ function paintHist(h){
   if (!h) return;
   const t = h.time || [], s = h.size || [];
   if (h.tmin) state.tRange = [h.tmin, h.tmax];
+  if (h.shi != null && !state.sBrush) state.sRange = [h.slo, h.shi];
   const draw = (el, data) => {
     const max = Math.max(1, ...data);
     el.querySelectorAll(".bar").forEach((b, i) => {
@@ -1085,8 +1089,13 @@ function paintHist(h){
   if (t.length) draw($("#tHist"), t);
   if (s.length) draw($("#sHist"), s);
   if (h.tmin){
-    $("#tA").textContent = new Date(h.tmin * 1000).getFullYear();
-    $("#tB").textContent = new Date(h.tmax * 1000).getFullYear();
+    const md = t => new Date(t * 1000).toLocaleDateString(undefined, { day:"numeric", month:"short", year:"numeric" });
+    $("#tA").textContent = md(h.tmin);        // oldest and newest file in these results
+    $("#tB").textContent = md(h.tmax);
+  }
+  if (h.shi != null && !state.sBrush){
+    $("#sA").textContent = fmtSize(Math.round(Math.pow(10, h.slo))) === "—" ? "0 B" : fmtSize(Math.round(Math.pow(10, h.slo)));
+    $("#sB").textContent = fmtSize(Math.round(Math.pow(10, h.shi)));
   }
   if (state.tBrush) tH.paint(state.tBrush[0], state.tBrush[1]);
   if (state.sBrush) sH.paint(state.sBrush[0], state.sBrush[1]);
@@ -1583,5 +1592,6 @@ $("#q").focus();
 <script src="/ui/ui-insights.js"></script>
 <script src="/ui/ui-pro.js"></script>
 <script src="/ui/ui-cloud.js"></script>
+<script src="/ui/ui-v2.js"></script>
 </body>
 </html>

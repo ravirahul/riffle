@@ -209,6 +209,7 @@ def settings_rows(q, limit=2):
 class Apps:
     def __init__(self, cache_file):
         self.file, self.items, self.loaded_at = cache_file, [], 0.0
+        self.last_total = 0
         try:
             with open(cache_file, encoding='utf-8') as f:
                 d = json.load(f)
@@ -258,6 +259,7 @@ class Apps:
                 out.append({'name': a['name'], 'dir': 'App', 'target': t, 'icon_path': t, 'group': 'Apps',
                             'kind': 'app', 'score': s + (2 if s == 8 else 1), 'hl': _hl(a['name'], q)})
         out.sort(key=lambda r: (-r['score'], len(r['name'])))
+        self.last_total = len(out)
         return out[:limit]
 
 
@@ -344,6 +346,7 @@ class History:
     def __init__(self, limit=30000):
         self.limit, self.entries, self.stamp, self.checked = limit, [], None, 0.0
         self.favdir, self.favdbs = None, []           # copies of each browser's Favicons database
+        self.last_total = 0
         self.lock = threading.Lock()
         self._busy = False
 
@@ -447,6 +450,7 @@ class History:
             s += min(2.0, math.log2(1 + n) / 3) + (1.5 if bm else 0) + math.exp(-(now - t) / 86400 / 30)
             scored.append((s, title, url, host, n, t, bm))
         scored.sort(key=lambda x: -x[0])
+        self.last_total = len(scored)
         out, seen = [], set()
         for s, title, url, host, n, t, bm in scored:
             name = re.sub(r'^\(\d+\)\s*', '', title) or host     # "(184) YouTube" -> "YouTube"
@@ -473,11 +477,12 @@ def compose(groups, top_extra=None, last=None, boosts=None, max_rows=9):
             r['score'] = r.get('score', 0) + boosts.get(str(r.get('target') or r.get('path') or '').lower(), 0)
     pool = [r for _, rows in groups for r in rows] + ([top_extra] if top_extra else [])
     top = max(pool, key=lambda r: r.get('score', 0)) if pool else None
+    origin = next((label for label, rows in groups if any(r is top for r in rows)), None)   # for "+N more"
     groups = [(label, [r for r in rows if r is not top]) for label, rows in groups]
     room = max_rows - (1 if top else 0) - (1 if last else 0)
     while sum(len(rows) for _, rows in groups) > room:
         max(groups, key=lambda g: len(g[1]))[1].pop()
-    out = [dict(top, group='Top hit')] if top else []
+    out = [dict(top, group='Top hit', origin=origin)] if top else []
     for label, rows in groups:
         out += [dict(r, group=label) for r in rows]
     if last:
@@ -525,6 +530,7 @@ if __name__ == '__main__':
                    last={'name': 'web', 'group': 'Search the web'}, boosts={'p2': 20}, max_rows=5)
     assert [r['name'] for r in rows] == ['f2', 'Calculator', 'f0', 's', 'web'], rows   # learned pick wins
     assert rows[0]['group'] == 'Top hit' and rows[-1]['group'] == 'Search the web'
+    assert rows[0]['origin'] == 'Files'                                               # f2 came from Files
     assert as_url('github.com') == 'https://github.com'
     assert as_url('https://x.ai/a') == 'https://x.ai/a'
     assert as_url('www.bbc.co.uk/news') == 'https://www.bbc.co.uk/news'

@@ -155,6 +155,7 @@ def settings_view():
         'autostart': auto, 'canAutostart': bool(getattr(sys, 'frozen', False)),
         'version': _ctx.get('version'), 'dataDir': _ctx['data_dir'],
         'visualPack': 'installed' if not pack_needed() else _pack['state'],
+        'voicePack': 'installed' if voice_models() else dict(_packs['voice']),
     }
 
 def inject(html: bytes) -> bytes:
@@ -341,6 +342,7 @@ STATIC = {'ui-extra.css': 'text/css; charset=utf-8', 'ui-extra.js': 'text/javasc
           'ui-settings.css': 'text/css; charset=utf-8', 'ui-settings.js': 'text/javascript; charset=utf-8',
           'ui-insights.css': 'text/css; charset=utf-8', 'ui-insights.js': 'text/javascript; charset=utf-8',
           'ui-cloud.css': 'text/css; charset=utf-8', 'ui-cloud.js': 'text/javascript; charset=utf-8',
+          'ui-v2.css': 'text/css; charset=utf-8', 'ui-v2.js': 'text/javascript; charset=utf-8',
           'ui-pro.css': 'text/css; charset=utf-8', 'ui-pro.js': 'text/javascript; charset=utf-8',
           'fonts/fonts.css': 'text/css; charset=utf-8',
           'fonts/instrument-sans.woff2': 'font/woff2', 'fonts/dm-mono-300.woff2': 'font/woff2',
@@ -488,6 +490,9 @@ def post(h, path, body):
     if path == '/api/visual/install':
         pack_install()
         return _json(h, {'pack': dict(_pack)})
+    if path == '/api/voice/install':
+        pack_install('voice')
+        return _json(h, {'pack': dict(_packs['voice'])})
     if path == '/api/update/open':
         u = check_update()
         if u.get('url', '') and u['url'].startswith('https://github.com/'):
@@ -714,26 +719,32 @@ def visual_status_light(visual_dir):
     _vlight.update(stamp=stamp, data=data)
     return data
 
-# -- optional visual-search pack -----------------------------------------------------
-# The installer ships without OpenCV, OpenVINO, Pillow and the model (~270 MB).
-# They come as one zip attached to the GitHub release, fetched only when wanted.
-PACK_NAME = 'riffle-visual-pack.zip'
-_pack = {'state': 'idle', 'got': 0, 'total': 0, 'error': ''}
+# -- optional packs: visual search, voice search -------------------------------------
+# The installer ships without the heavy libraries. Each pack is one zip attached to a
+# GitHub release (site/ libraries + models/), fetched only when someone wants it.
+#   visual: OpenCV, OpenVINO, Pillow, DINOv2 (~120 MB)
+#   voice:  sherpa-onnx, sounddevice, a streaming English model (~75 MB)
+PACKS = {'visual': 'riffle-visual-pack.zip', 'voice': 'riffle-voice-pack.zip'}
+PACK_NAME = PACKS['visual']
+PACK_DLL_DIRS = {'visual': ('openvino\\libs', 'openvino', 'cv2', 'PIL'),
+                 'voice': ('sherpa_onnx\\lib', '_sounddevice_data\\portaudio-binaries')}
+_packs = {n: {'state': 'idle', 'got': 0, 'total': 0, 'error': ''} for n in PACKS}
+_pack = _packs['visual']
 
-def pack_dir():
-    return os.path.join(_ctx['data_dir'], 'addons', 'visual')
+def pack_dir(name='visual'):
+    return os.path.join(_ctx['data_dir'], 'addons', name)
 
-def pack_needed():
-    """True when this build has no visual libraries and the pack isn't installed."""
+def pack_needed(name='visual'):
+    """True when this build has no libraries for `name` and its pack isn't installed."""
     import sys
     if not getattr(sys, 'frozen', False):
         return False                      # running from source: use the normal site-packages
-    return not os.path.exists(os.path.join(pack_dir(), 'ok'))
+    return not os.path.exists(os.path.join(pack_dir(name), 'ok'))
 
-def pack_activate():
+def pack_activate(name='visual'):
     """Put the pack on the import path. Returns its models folder, or None."""
     import sys
-    d = pack_dir()
+    d = pack_dir(name)
     if not os.path.exists(os.path.join(d, 'ok')):
         return None
     site = os.path.join(d, 'site')
@@ -743,15 +754,15 @@ def pack_activate():
         # Visual C++ redistributable only finds it if that folder is on the DLL search path
         if getattr(sys, '_MEIPASS', None):
             os.add_dll_directory(sys._MEIPASS)
-        for sub in ('openvino\\libs', 'openvino', 'cv2', 'PIL'):
+        for sub in PACK_DLL_DIRS[name]:
             p = os.path.join(site, sub)
             if os.path.isdir(p):
                 os.add_dll_directory(p)
     return os.path.join(d, 'models')
 
-def _pack_assets():
+def _pack_assets(name='visual'):
     """(zip url, size, sha256 url) from the newest release that carries the pack. A release
-    published without it (an app-only update) must not break visual search for new users."""
+    published without it (an app-only update) must not break the feature for new users."""
     url = f"https://api.github.com/repos/{_ctx['repo']}/releases?per_page=15"
     req = urllib.request.Request(url, headers={'User-Agent': 'Riffle', 'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -760,63 +771,73 @@ def _pack_assets():
         if rel.get('draft') or rel.get('prerelease'):
             continue
         assets = {a['name']: a for a in rel.get('assets', [])}
-        z, sha = assets.get(PACK_NAME), assets.get(PACK_NAME + '.sha256')
+        z, sha = assets.get(PACKS[name]), assets.get(PACKS[name] + '.sha256')
         if z and sha:
             return z['browser_download_url'], z.get('size', 0), sha['browser_download_url']
-    raise RuntimeError('the visual pack is not on any recent Riffle release')
+    raise RuntimeError(f'the {name} pack is not on any recent Riffle release')
 
-def pack_install():
-    if _pack['state'] == 'downloading':
+def pack_install(name='visual'):
+    st = _packs[name]
+    if st['state'] in ('downloading', 'unpacking'):
         return
     def run():
         import hashlib
         import shutil
         import zipfile
-        _pack.update(state='downloading', got=0, total=0, error='')
+        st.update(state='downloading', got=0, total=0, error='')
         base = os.path.join(_ctx['data_dir'], 'addons')
         os.makedirs(base, exist_ok=True)
-        zpath = os.path.join(base, PACK_NAME + '.part')
+        zpath = os.path.join(base, PACKS[name] + '.part')
         try:
-            url, size, sum_url = _pack_assets()
+            url, size, sum_url = _pack_assets(name)
             with urllib.request.urlopen(urllib.request.Request(sum_url, headers={'User-Agent': 'Riffle'}), timeout=15) as r:
                 want = r.read().decode().split()[0].lower()
-            _pack['total'] = size
+            st['total'] = size
             h = hashlib.sha256()
             with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Riffle'}), timeout=30) as r, \
                     open(zpath, 'wb') as f:
                 while chunk := r.read(1 << 20):
                     f.write(chunk)
                     h.update(chunk)
-                    _pack['got'] += len(chunk)
+                    st['got'] += len(chunk)
             if h.hexdigest() != want:
                 raise RuntimeError('download was corrupted (checksum mismatch), please try again')
-            _pack['state'] = 'unpacking'
-            tmp = pack_dir() + '.new'
+            st['state'] = 'unpacking'
+            tmp = pack_dir(name) + '.new'
             shutil.rmtree(tmp, ignore_errors=True)
             with zipfile.ZipFile(zpath) as z:
                 import sys
                 want_py = f'Python {sys.version_info.major}.{sys.version_info.minor}'
                 got_py = z.read('PACK.txt').decode('utf-8', 'replace') if 'PACK.txt' in z.namelist() else ''
                 if want_py not in got_py:
-                    raise RuntimeError(f'this visual pack is for a different Riffle build ({got_py.strip()}); '
+                    raise RuntimeError(f'this {name} pack is for a different Riffle build ({got_py.strip()}); '
                                        'update Riffle and try again')
                 for m in z.namelist():                 # refuse paths escaping the folder
                     if m.startswith(('/', '\\')) or '..' in m.replace('\\', '/').split('/'):
                         raise RuntimeError('bad file in pack')
                 z.extractall(tmp)
             open(os.path.join(tmp, 'ok'), 'w').close()
-            shutil.rmtree(pack_dir(), ignore_errors=True)
-            os.replace(tmp, pack_dir())
-            _pack['state'] = 'done'
-            _ctx.get('reset_visual', lambda: None)()
+            shutil.rmtree(pack_dir(name), ignore_errors=True)
+            os.replace(tmp, pack_dir(name))
+            st['state'] = 'done'
+            _ctx.get('reset_' + name, lambda: None)()
         except Exception as e:
-            _pack.update(state='error', error=str(e))
+            st.update(state='error', error=str(e))
         finally:
             try:
                 os.remove(zpath)
             except OSError:
                 pass
-    threading.Thread(target=run, daemon=True, name='visual-pack').start()
+    threading.Thread(target=run, daemon=True, name=name + '-pack').start()
+
+def voice_models():
+    """Folder holding the voice model, or None when voice search isn't installed."""
+    import sys
+    if getattr(sys, 'frozen', False):
+        m = pack_activate('voice')
+        return os.path.join(m, 'voice') if m else None
+    here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'voice')
+    return here if os.path.exists(os.path.join(here, 'tokens.txt')) else None
 
 # -- Riffle Pro --------------------------------------------------------------------
 # Free: search, quick bar, preview, Insights, every scan, removing duplicates one set
