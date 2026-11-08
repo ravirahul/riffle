@@ -57,6 +57,8 @@ DEFAULTS = {
     'homeRecent': True,          # empty search shows recently changed files
     'quickPreview': True,        # quick bar shows a preview of the selected file
     'quickLook': 'paper',        # paper | glass
+    'quickTint': 40,             # Glass transparency, 0-100
+    'quickStart': 'recent',      # what the empty quick bar shows: empty | recent | last | both
     'quickApps': True,           # quick bar: apps
     'quickSettings': True,       # quick bar: Windows settings pages
     'quickHistory': True,        # quick bar: browser history + bookmarks (read on this PC only)
@@ -99,7 +101,7 @@ def _clean_setting(k, v):
         return bool(v)
     if isinstance(d, int):
         v = int(v)
-        lo, hi = {'dupesMin': (0, 1 << 40), 'cleanDownloadsDays': (1, 3650), 'cleanBigMB': (10, 1 << 20),
+        lo, hi = {'quickTint': (0, 100), 'dupesMin': (0, 1 << 40), 'cleanDownloadsDays': (1, 3650), 'cleanBigMB': (10, 1 << 20),
                   'cleanInstallerDays': (0, 3650), 'autoCleanLast': (0, 1 << 40), 'autoCleanFreed': (0, 1 << 60)}[k]
         return max(lo, min(hi, v))
     if k == 'excludeDirs':
@@ -110,7 +112,8 @@ def _clean_setting(k, v):
             raise ValueError('unknown hotkey')
         return v
     allowed = {'theme': ('system', 'light', 'dark'), 'hotkeyOpens': ('bar', 'window'),
-               'quickLook': ('paper', 'glass'), 'searchEngine': ('google', 'bing', 'duckduckgo')}[k]
+               'quickLook': ('paper', 'glass'), 'searchEngine': ('google', 'bing', 'duckduckgo'),
+               'quickStart': ('empty', 'recent', 'last', 'both')}[k]
     if v not in allowed:
         raise ValueError(f'bad value for {k}')
     return v

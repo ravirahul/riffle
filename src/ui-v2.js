@@ -11,6 +11,7 @@ const SVG = {
   mic:'<svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>',
   list:'<svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
   table:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M3 15h18M9 4v16"/></svg>',
+  grid:'<svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></svg>',
 };
 const NO_DATE = 315619200;                   // 2 Jan 1980: anything earlier is "no date" (zip/DOS default)
 const rel = t => {
@@ -66,6 +67,7 @@ $(".main").insertAdjacentHTML("afterbegin", `
     </select>
     <div class="vtog" role="group" aria-label="View">
       <button data-v2view="list" title="List">${SVG.list}</button>
+      <button data-v2view="grid" title="Grid: big thumbnails">${SVG.grid}</button>
       <button data-v2view="details" title="Details: the table, with exact sizes and full paths">${SVG.table}</button>
     </div>
   </div>
@@ -84,31 +86,40 @@ document.body.insertAdjacentHTML("beforeend", `
   </div>
 `);
 
-/* filters live in the sidebar as accordions; Modified and Where start open */
+/* filters live in the sidebar as accordions: Modified, Size, File types, Where (first two open).
+   Settings sits at the bottom of the sidebar. */
 $(".rail .nav").insertAdjacentHTML("afterend", `<div class="acc" aria-label="Filters">
   <details id="accTime" open><summary><span class="t">Modified</span><span class="v" id="ddTime">Any time</span></summary>
     <div class="accin" id="mTimeIn"></div></details>
-  <details id="accWhere" open><summary><span class="t">Where</span><span class="v" id="ddWhere">Anywhere</span></summary>
-    <div class="accin" id="mWhereIn"><h4>Only in this folder</h4></div></details>
-  <details id="accSize"><summary><span class="t">Size</span><span class="v" id="ddSize">Any size</span></summary>
-    <div class="accin"><div class="chips" id="sizeChips">
-      ${[["", "Any size"], ["0-1048576", "Under 1 MB"], ["1048576-104857600", "1 – 100 MB"],
-         ["104857600-1073741824", "100 MB – 1 GB"], ["1073741824-", "Over 1 GB"]].map(([v, l]) =>
-        `<button class="chip" data-sz="${v}">${l}</button>`).join("")}
+  <details id="accSize" open><summary><span class="t">Size</span><span class="v" id="ddSize">Any size</span></summary>
+    <div class="accin"><div class="chips oneline" id="sizeChips">
+      ${[["0-1048576", "< 1 MB", "Under 1 MB"], ["1048576-104857600", "1–100 MB", "1 MB to 100 MB"],
+         ["104857600-1073741824", "< 1 GB", "100 MB to 1 GB"], ["1073741824-", "> 1 GB", "Over 1 GB"]].map(([v, l, t]) =>
+        `<button class="chip" data-sz="${v}" title="${t}. Click again to clear.">${l}</button>`).join("")}
     </div><div id="mSizeIn"></div></div></details>
-  <details id="accTypes"><summary><span class="t">More types</span><span class="v" id="ddTypes">All</span></summary>
+  <details id="accTypes"><summary><span class="t">File types</span><span class="v" id="ddTypes">All</span></summary>
     <div class="accin"><h4>Kinds</h4><div class="chips" id="moreCats"></div><h4>Extensions</h4><div id="mExt"></div></div></details>
+  <details id="accWhere"><summary><span class="t">Where</span><span class="v" id="ddWhere">Anywhere</span></summary>
+    <div class="accin" id="mWhereIn"><h4>Only in this folder</h4></div></details>
   <button class="clear2" id="v2clear" hidden>Clear all filters</button>
 </div>`);
+$(".rail").insertAdjacentHTML("beforeend", `<div class="railfoot"><button class="navset" id="railSet" title="Settings (Ctrl+,)">${ICO.general}<span>Settings</span></button></div>`);
+$("#railSet").onclick = () => openSettings();
+/* short date chips, one line */
+for (const [d, l, t] of [[1, "Today", "Changed today"], [7, "7d", "Last 7 days"], [30, "30d", "Last 30 days"], [365, "1y", "Last year"]]){
+  const c = document.querySelector(`#dateChips [data-days="${d}"]`);
+  if (c){ c.textContent = l; c.title = t + ". Click again to clear."; }
+}
+$("#dateChips").classList.add("oneline");
 $("#v2clear").onclick = () => {
   $("#clearAll").click();
   $$("#sizeChips .chip").forEach(c => c.setAttribute("aria-pressed", "false"));
   setTimeout(syncChips);
 };
-try{ const o = JSON.parse(localStorage.getItem("riffle.v2.acc") || "{}");
+try{ const o = JSON.parse(localStorage.getItem("riffle.v2.acc2") || "{}");
      for (const [id, on] of Object.entries(o)) if ($("#" + id)) $("#" + id).open = on; }catch(e){}
 $$(".acc details").forEach(d => d.addEventListener("toggle", () => {
-  try{ localStorage.setItem("riffle.v2.acc", JSON.stringify(Object.fromEntries($$(".acc details").map(x => [x.id, x.open])))); }catch(e){}
+  try{ localStorage.setItem("riffle.v2.acc2", JSON.stringify(Object.fromEntries($$(".acc details").map(x => [x.id, x.open])))); }catch(e){}
 }));
 
 /* move the originals into the menus (ids and listeners come along) */
@@ -214,12 +225,12 @@ paintFacets = (orig => function(c){ orig(c); syncChips(); syncMoreCats(); })(pai
 $("#dateChips").addEventListener("click", () => setTimeout(syncChips));
 $("#sizeChips").addEventListener("click", e => {
   const b = e.target.closest("[data-sz]"); if (!b) return;
+  const off = b.getAttribute("aria-pressed") === "true";       // clicking the chosen size again clears it
   const [lo, hi] = b.dataset.sz.split("-");
-  $$("#sizeChips .chip").forEach(c => c.setAttribute("aria-pressed", c === b && !!b.dataset.sz));
-  state.sizeMin = lo ? +lo : (b.dataset.sz ? 0 : null);
-  state.sizeMax = hi ? +hi : null;
-  if (!b.dataset.sz){ state.sizeMin = state.sizeMax = null; }
-  state.sBrush = null; sH.paint(null); $("#sReset").hidden = !b.dataset.sz;
+  $$("#sizeChips .chip").forEach(c => c.setAttribute("aria-pressed", c === b && !off));
+  state.sizeMin = off ? null : (lo ? +lo : 0);
+  state.sizeMax = off ? null : (hi ? +hi : null);
+  state.sBrush = null; sH.paint(null); $("#sReset").hidden = off;
   updateBrushLabels(); scheduleSearch(0); syncChips();
 });
 $("#sReset").addEventListener("click", () => { $$("#sizeChips .chip").forEach(c => c.setAttribute("aria-pressed", "false")); setTimeout(syncChips); });
@@ -237,18 +248,63 @@ $("#v2sort").onchange = e => {
 };
 
 /* ── 3. List / Details ───────────────────────────────────────────────────── */
+const GRID = { w:172, h:184, gap:12, pad:14 };
+let view = "list";
+const gridCols = () => Math.max(1, Math.floor(($("#scroll").clientWidth - GRID.pad * 2 + GRID.gap) / (GRID.w + GRID.gap)));
 function setListView(v){
-  const list = v !== "details";
-  document.body.classList.toggle("v2list", list);
-  ROW = list ? 52 : 30;
-  document.documentElement.style.setProperty("--row", ROW + "px");
-  $$(".vtog button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v2view === (list ? "list" : "details")));
+  view = ["list", "grid", "details"].includes(v) ? v : "list";
+  document.body.classList.toggle("v2list", view === "list");
+  document.body.classList.toggle("v2grid", view === "grid");
+  ROW = view === "details" ? 30 : view === "list" ? 52 : GRID.h + GRID.gap;
+  document.documentElement.style.setProperty("--row", (view === "grid" ? 30 : ROW) + "px");
+  $$(".vtog button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v2view === view));
   $("#spacer").style.height = (state.total * ROW) + "px";
-  try{ localStorage.setItem("riffle.v2.view", list ? "list" : "details"); }catch(e){}
+  try{ localStorage.setItem("riffle.v2.view", view); }catch(e){}
   render();
 }
 $(".vtog").addEventListener("click", e => { const b = e.target.closest("[data-v2view]"); if (b) setListView(b.dataset.v2view); });
+
+/* grid: cards in rows of N, only the visible ones built (same virtual list, same .row[data-i] events) */
+function renderGrid(){
+  const sc = $("#scroll"), rowsEl = $("#rows"), cols = gridCols(), rh = GRID.h + GRID.gap;
+  $("#spacer").style.height = (Math.ceil(state.total / cols) * rh + GRID.pad * 2) + "px";
+  $("#empty").style.display = state.total ? "none" : "flex";
+  if (!state.total){ rowsEl.innerHTML = ""; return; }
+  const r0 = Math.max(0, Math.floor((sc.scrollTop - GRID.pad) / rh) - 2);
+  const first = r0 * cols, last = Math.min(state.total, (r0 + Math.ceil(sc.clientHeight / rh) + 4) * cols);
+  ensurePages(first, last);
+  let html = "";
+  for (let i = first; i < last; i++){
+    const page = state.pages.get(Math.floor(i / PAGE)), r = page ? page[i % PAGE] : null;
+    const x = GRID.pad + (i % cols) * (GRID.w + GRID.gap), y = GRID.pad + Math.floor(i / cols) * rh;
+    const sel = (i === state.sel || state.marked.has(i)) ? " sel" : "";
+    const pos = `left:${x}px;top:${y}px;width:${GRID.w}px;height:${GRID.h}px`;
+    if (!r){ html += `<div class="row card skel${sel}" data-i="${i}" style="${pos}"><div class="th"></div></div>`; continue; }
+    const p = joinPath(r), pic = r.cat === "image" || r.cat === "video";
+    const th = pic ? `<img loading="lazy" src="${fileURL("thumb", p, 256)}" alt="" onerror="this.className='ico3';this.onerror=()=>{this.onerror=null;this.src='${BLANK}'};this.src='${iconURL(r)}'">`
+                   : `<img class="ico3" src="${iconURL(r)}" ${NOICON} alt="">`;
+    html += `<div class="row card${sel}" data-i="${i}" style="${pos}" title="${esc(p)}">
+      <div class="th">${th}</div><div class="nm">${highlight(r.name)}</div>
+      <div class="sub">${r.cat === "folder" ? "Folder" : fmtSize(r.size)} · ${rel(r.mtime)}</div></div>`;
+  }
+  rowsEl.innerHTML = html;
+  if (pv.on) showPreview();
+}
+document.addEventListener("keydown", e => {                 // grid: arrows move across and down the cards
+  if (view !== "grid" || !state.total || !["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && (document.activeElement === $("#q") && $("#q").value)) return;
+  if (vis.on || qmode !== "search" || $("#set.on, .dlg.on, #menu.on")) return;
+  e.preventDefault(); e.stopPropagation();
+  const cols = gridCols(), d = { ArrowDown:cols, ArrowUp:-cols, ArrowLeft:-1, ArrowRight:1 }[e.key];
+  state.sel = Math.max(0, Math.min(state.total - 1, (state.sel < 0 ? 0 : state.sel + d)));
+  state.marked.clear(); state.anchor = state.sel;
+  const sc = $("#scroll"), top = GRID.pad + Math.floor(state.sel / cols) * (GRID.h + GRID.gap);
+  if (top < sc.scrollTop) sc.scrollTop = top - GRID.pad;
+  else if (top + GRID.h > sc.scrollTop + sc.clientHeight) sc.scrollTop = top + GRID.h - sc.clientHeight + GRID.pad;
+  render(); updateStat(); showPreview();
+}, true);
 render = (orig => function(){
+  if (view === "grid") return renderGrid();
   orig();
   if (!document.body.classList.contains("v2list")) return;
   for (const el of $$("#rows .row[data-i]:not(.skel)")){
@@ -323,11 +379,39 @@ $("#hQuick").innerHTML = QUICK.map(([l], i) => `<button class="chip" data-q="${i
 $("#hQuick").onclick = e => { const b = e.target.closest("[data-q]"); if (b) QUICK[+b.dataset.q][1](); };
 $("#hSpace").onclick = e => { const b = e.target.closest("[data-hv]"); if (b) setView(b.dataset.hv); };
 $("#hAllRecent").onclick = () => { app.classList.add("allrecent"); render(); };
+/* the "all recent files" strip gets a way back to the start screen */
+const hb = document.querySelector(".homebar");
+if (hb){
+  hb.insertAdjacentHTML("afterbegin", `<button class="btn" id="hBack" title="Back to the start screen (Esc)">← Start</button>`);
+  $("#hBack").onclick = () => { app.classList.remove("allrecent"); homeShown = false; app.classList.toggle("home", true); };
+}
+
+/* Esc goes back one step at a time, ending on the empty start screen. Ctrl+Esc closes the window. */
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (e.ctrlKey || e.metaKey){
+    e.preventDefault(); e.stopPropagation();
+    window.close();
+    setTimeout(() => toast("Close this window with Alt+F4. Riffle keeps running for the hotkey."), 300);
+    return;
+  }
+  if ($("#set.on, .dlg.on, #menu.on, .pop.on") || vPoll || vis.on) return;    // those handle their own Esc
+  const back = fn => { e.preventDefault(); e.stopPropagation(); fn(); };
+  if (qmode !== "search") return back(() => setQMode("search"));
+  if (app.dataset.view !== "search") return back(() => setView("search"));
+  if ($("#q").value) return;                                                    // the window clears the box
+  if (app.classList.contains("allrecent")) return back(() => $("#hBack").click());
+  if (!app.classList.contains("home") && !$("#v2clear").hidden) return back(() => $("#v2clear").click());
+  if (state.sel >= 0) return back(() => { state.sel = -1; state.marked.clear(); render(); showPreview(true); updateStat(); });
+}, true);
 $("#q").addEventListener("input", () => { if (!$("#q").value) app.classList.remove("allrecent"); });
 let histAll = false;
 $("#hHistory").onclick = () => { histAll = !histAll; $("#hHistory").textContent = histAll ? "Fewer" : "Open history →"; paintPicks(); };
 const openPath = p => fetch("/api/act", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ action:"open", paths:[p], q:"" }) });
 const iconFor2 = r => iconURL(r);              // same Windows icons as the result list
+/* a plain page for files Windows has no icon for (e.g. files without an extension) */
+const BLANK = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.5"><path d="M6 2.5h8l4.5 4.5v14.5H6z"/><path d="M14 2.5V7h4.5"/></svg>');
+const NOICON = `onerror="this.onerror=null;this.src='${BLANK}'"`;
 async function paintRecent(){
   if (!SET || SET.hideSystem === undefined) await loadSettings();     // filters() needs "hide system files"
   const d = await fetch("/api/search", { method:"POST", headers:{ "Content-Type":"application/json" },
@@ -336,7 +420,7 @@ async function paintRecent(){
     .then(r => r.json()).catch(() => ({ rows:[] }));
   if (!state.homeDir && d.rows && d.rows[0]){ const m = /^([A-Za-z]:\\Users\\[^\\]+)/.exec(d.rows[0].dir); if (m) state.homeDir = m[1]; }
   $("#hRecent").innerHTML = (d.rows || []).map(r => `<li data-p="${esc((r.dir.endsWith("\\") ? r.dir : r.dir + "\\") + r.name)}" title="${esc(r.dir)}">
-      <img src="${iconFor2(r)}" alt=""><span class="nm">${esc(r.name)}</span><span class="wh">${esc(friendly(r.dir))}</span><span class="tm">${rel(r.mtime)}</span></li>`).join("")
+      <img src="${iconFor2(r)}" ${NOICON} alt=""><span class="nm">${esc(r.name)}</span><span class="wh">${esc(friendly(r.dir))}</span><span class="tm">${rel(r.mtime)}</span></li>`).join("")
     || `<li class="hempty">Nothing yet. Riffle is still reading this PC.</li>`;
 }
 async function paintPicks(){
@@ -345,14 +429,14 @@ async function paintPicks(){
   const box = $("#hPicks");
   if (!items.length){ box.innerHTML = `<div class="hempty">Files you open from Riffle show up here, so you can get back to them in one click.</div>`; return; }
   if (histAll){
-    box.innerHTML = `<ul class="hlist">${items.map(r => `<li data-p="${esc(r.path)}" title="${esc(r.path)}"><img src="${iconFor2(r)}" alt="">
+    box.innerHTML = `<ul class="hlist">${items.map(r => `<li data-p="${esc(r.path)}" title="${esc(r.path)}"><img src="${iconFor2(r)}" ${NOICON} alt="">
       <span class="nm">${esc(r.name)}</span><span class="wh">${esc(friendly(r.dir))}</span><span class="tm">Opened ${rel(r.opened)}</span></li>`).join("")}</ul>`;
     return;
   }
   const pic = r => r.cat === "image" || r.cat === "video";
   box.innerHTML = `<div class="hgrid">${items.slice(0, 8).map(r => `<button class="hcard" data-p="${esc(r.path)}" title="${esc(r.path)}">
-    <span class="th">${pic(r) ? `<img src="${fileURL("thumb", r.path, 256)}" alt="" onerror="this.className='ico2';this.src='${fileURL("icon", r.path, 48)}'">`
-      : `<img class="ico2" src="${iconFor2(r)}" alt="">`}</span>
+    <span class="th">${pic(r) ? `<img src="${fileURL("thumb", r.path, 256)}" alt="" onerror="this.className='ico2';this.onerror=()=>{this.onerror=null;this.src='${BLANK}'};this.src='${iconFor2(r)}'">`
+      : `<img class="ico2" src="${iconFor2(r)}" ${NOICON} alt="">`}</span>
     <b>${esc(r.name)}</b><small>Opened ${rel(r.opened)}</small></button>`).join("")}</div>`;
 }
 $("#home").addEventListener("click", e => { const el = e.target.closest("[data-p]"); if (el) openPath(el.dataset.p); });
@@ -414,7 +498,7 @@ async function voiceStart(){
     $("#vpTitle").textContent = "Voice search isn't set up yet";
     $("#vpText").textContent = "Speak instead of typing. It works offline: your voice is turned into text on this PC and nothing is recorded or sent. One free download, 65 MB.";
     $("#vpBtns").innerHTML = `<button class="btn ink big" id="vpInstall">Set up voice search</button>`;
-    $("#vpInstall").onclick = () => openSettings("general");
+    $("#vpInstall").onclick = () => openSettings("quick");
     $("#voicePanel").classList.add("on"); app.classList.add("vp-on");
     return;
   }
@@ -549,7 +633,7 @@ document.querySelector("#sp-general").insertAdjacentHTML("afterend", `<div class
     <li><b>Image</b> finds the original of a picture, other copies and look-alikes. Press ${k("↓")} to choose a file,
         or ${k("Ctrl")} ${k("V")} to paste a copied picture or screenshot. Set its folders under <b>Visual search</b>.</li>
     <li><b>Voice</b> types as you speak and searches as you go. Pause when you are done; ${k("Esc")} stops.
-        Add it once under <b>General › Voice search</b> (65 MB, works offline).</li>
+        Add it once under <b>Settings › Quick bar › Show in results</b> (65 MB, works offline).</li>
   </ul>
 
   <h3>What you can type</h3>
@@ -561,10 +645,11 @@ document.querySelector("#sp-general").insertAdjacentHTML("afterend", `<div class
 
   <h3>This window</h3>
   <ul>
-    <li>The chips under the box narrow by type. The sidebar narrows by <b>Modified</b> date, <b>Where</b>, <b>Size</b> and
-        more types; drag across a graph to pick a range.</li>
+    <li>The chips under the box narrow by type. The sidebar narrows by <b>Modified</b> date, <b>Size</b>, <b>File types</b>
+        and <b>Where</b>; drag across a graph to pick a range.</li>
     <li>${k("Aa")} changes how names match (close enough, patterns) and shows hidden and system files.</li>
-    <li><b>List</b> is easy to read; <b>Details</b> is the full table with exact sizes and paths.</li>
+    <li><b>List</b> is easy to read, <b>Grid</b> shows big thumbnails, <b>Details</b> is the full table with exact sizes and paths.</li>
+    <li>${k("Esc")} goes back one step at a time, to the start screen · ${k("Ctrl")} ${k("Esc")} closes the window.</li>
     <li>${k("Space")} shows or hides the preview · ${k("Ctrl")} ${k("D")} switches dark mode · ${k("Ctrl")} ${k("K")} jumps to the box.</li>
   </ul>
 

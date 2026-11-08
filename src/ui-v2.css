@@ -188,3 +188,53 @@
 #sp-about .links a:hover,#sp-about .mk-credit:hover{border-color:var(--ink)}
 #sp-about .links .hint{flex-basis:100%}
 .accin .scope .hd{display:none}                 /* the accordion heading already says it */
+
+/* ── sidebar: views, filters, Settings at the bottom ─────────────────────── */
+.rail{display:flex;flex-direction:column}
+.railfoot{margin-top:auto;position:sticky;bottom:-40px;background:var(--card);padding:10px 0 4px;border-top:1px solid var(--rule)}
+.navset{display:flex;align-items:center;gap:12px;width:100%;height:38px;padding:0 10px;border:0;background:none;cursor:pointer;
+  color:var(--ink-2);font:inherit;font-size:13px;text-align:left}
+.navset:hover{background:var(--paper);color:var(--ink)}
+.navset svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.9;flex-shrink:0}
+#setBtn{display:none}                                     /* Settings lives at the bottom of the sidebar */
+.chips.oneline{flex-wrap:nowrap;gap:4px}
+.chips.oneline .chip{flex:1 1 0;justify-content:center;padding:0 4px;white-space:nowrap;font-size:11.5px;min-width:0}
+.homebar #hBack{height:28px;padding:0 10px;font-size:12px;margin-right:6px}
+
+/* ── grid view ────────────────────────────────────────────────────────────── */
+.v2grid .main .head{display:none}
+.v2grid .row.card{right:auto;display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--rule);
+  background:var(--card);cursor:default;border-bottom:1px solid var(--rule)}
+.v2grid .row.card:hover{border-color:var(--ink-2)}
+.v2grid .row.card.sel{border-color:var(--ink);box-shadow:0 0 0 2px var(--mark-soft);background:var(--card)}
+.v2grid .row.card .th{flex:1;min-height:0;display:grid;place-items:center;background:var(--paper);overflow:hidden}
+.v2grid .row.card .th img{max-width:100%;max-height:100%;object-fit:contain}
+.v2grid .row.card .th img.ico3{width:48px;height:48px;object-fit:contain}
+.v2grid .row.card .nm{font-weight:500;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v2grid .row.card .sub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v2grid .row.card.skel .th{background:var(--rule)}
+.v2grid .foot #perf,.v2grid .foot #ver,.v2grid .foot #reindex{display:none}
+
+/* ── one shape everywhere: the Settings button's 3px corner ───────────────── */
+:root{--r:3px}
+.btn,.chip,.icobtn,.field,select,textarea,input[type=text],input[type=search],input:not([type]),#q,
+.seg,.seg2,.seg2 button,.vtog,.vtog button,.qmodes button,#aaBtn,.frow select,
+.pop,.menu,.dlg .box,.toast,.set-box,.srow select,
+.hlist,.hlist li,.hcard,.hcard .th,.spacecards button,.drop,.inote,.homebar,.kb,kbd,
+.vcard,.vhero,.vcard .im,.badge,.pill,.prochip,.mk-card,
+#sp-about .links a,#sp-about .mk-credit,.row.card,.row.card .th,.v2list .row,
+.nav button,.navset,.set-tabs button,.pv-acts .btn,.pv-stage,.ledit li,.extchips .chip{border-radius:var(--r) !important}
+
+/* ── Settings › Quick bar accordions ─────────────────────────────────────── */
+.sacc{border:1px solid var(--rule);border-radius:var(--r);margin-bottom:10px;background:var(--card)}
+.sacc>summary{list-style:none;cursor:pointer;padding:12px 14px;font-weight:600;font-size:13.5px;display:flex;align-items:center}
+.sacc>summary::-webkit-details-marker{display:none}
+.sacc>summary::after{content:"";margin-left:auto;width:6px;height:6px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);
+  transform:rotate(-45deg);transition:transform .15s}
+.sacc[open]>summary::after{transform:rotate(45deg)}
+.sacc>.srow{margin:0 14px}
+.sacc>.srow:last-child{border-bottom:0}
+.rng{display:flex;align-items:center;gap:10px}
+.rng input{width:150px;accent-color:var(--ink)}
+.rng output{font-family:var(--mono);font-size:12px;min-width:38px;text-align:right}
+.v2grid .row.card{align-items:stretch}                 /* the picture panel fills the card */

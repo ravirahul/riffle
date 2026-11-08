@@ -302,7 +302,7 @@ def _border(hwnd, color):
 class QuickBar:
     def __init__(self, search, open_path, reveal, open_app, icon_png, theme,
                  content=None, picked=None, preview=None, preview_on=None, open_target=None, look=None,
-                 visual=None, clip_image=None, voice_start=None, voice_stop=None):
+                 visual=None, clip_image=None, voice_start=None, voice_stop=None, tint=None, start_view=None):
         self._search, self._open_path, self._reveal = search, open_path, reveal
         self._open_app, self._icon_png, self._theme = open_app, icon_png, theme
         self._content, self._picked = content, picked            # text-inside search, "you opened this"
@@ -311,6 +311,9 @@ class QuickBar:
         self._visual, self._clip_image = visual, clip_image       # image mode: rows for a picture
         self._voice_start, self._voice_stop = voice_start, voice_stop
         self._mode, self._modal = 'search', False
+        self._tint = tint or (lambda: 40)                         # Glass transparency 0-100
+        self._start_view = start_view or (lambda: 'recent')       # empty | recent | last | both
+        self._sv, self._last_q = 'recent', ''
         self._listening, self._lvl, self._phase = False, 0.0, 0
         self._lvls = deque([0.0] * 36, maxlen=36)
         self._mode_hits, self._more_hits = [], []
@@ -429,10 +432,14 @@ class QuickBar:
         look = 'glass' if self._safe(self._look) == 'glass' and _glass_supported() else 'paper'
         if look == 'glass' and not _blur_on():
             look = 'glass-solid'                       # same colours, no see-through (Windows has it off)
-        if (name, look) == self._tname:
+        t = self._safe(self._tint)
+        t = 40 if t is None else max(0, min(100, int(t)))
+        alpha = max(60, min(250, round(250 - t * 1.9)))           # 0% = nearly solid, 100% = very clear
+        if (name, look, alpha) == self._tname:
             return
-        self._tname = (name, look)
-        self.c = (GLASS[name] if look == 'glass' else dict(GLASS[name], tint=None) if look == 'glass-solid'
+        self._tname = (name, look, alpha)
+        glass = dict(GLASS[name], tint=(alpha << 24) | (GLASS[name]['tint'] & 0xFFFFFF))
+        self.c = (glass if look == 'glass' else dict(GLASS[name], tint=None) if look == 'glass-solid'
                   else THEMES[name])
         c = self.c
         try:
@@ -444,7 +451,7 @@ class QuickBar:
             pass
         if self.hwnd and not _glass(self.hwnd, c.get('tint')) and look == 'glass':
             self.root.attributes('-transparentcolor', '')          # Windows said no: stay Paper
-            self._tname, self.c = (name, 'paper'), THEMES[name]
+            self._tname, self.c = (name, 'paper', 0), THEMES[name]
             c = self.c
         self.root.configure(bg=c['card'])
         self.cv.configure(bg=c['card'])
@@ -475,10 +482,19 @@ class QuickBar:
         self._mon = (x0, y0, mw, mh)
         if self._mode != 'search':
             self._set_mode('search', quiet=True)
+        self._sv = self._safe(self._start_view) or 'recent'
         if q:
             self.var.set(q)             # traces schedule the search
+        elif self._sv == 'last' and self._last_q:
+            self.var.set(self._last_q)  # selected below, so typing replaces it
         else:
-            self._schedule(0)           # refresh results / recent list
+            if self.var.get():
+                self.var.set('')
+            if self._sv == 'empty':
+                self._seq += 1
+                self._rows, self._q_shown, self._sel = [], None, -1
+            else:
+                self._schedule(0)       # recent files (and the last search, for "both")
         self._layout()
         if not self.shown:
             self.root.deiconify()
@@ -510,6 +526,9 @@ class QuickBar:
         self.last_show_ms = (time.perf_counter() - t0) * 1000
 
     def _hide(self):
+        q = self.var.get().strip() if self.var else ''
+        if q and self._mode == 'search' and q != '?':
+            self._last_q = q            # for "When it opens: Last search"
         if self._listening:
             self._safe(self._voice_stop)
             self._listening = False
@@ -559,8 +578,10 @@ class QuickBar:
 
     @staticmethod
     def _note(name, sub, glyph='i', group=None, **kw):
-        return dict(kind='help', name=name, dir=sub, title=name, about=kw.pop('about', sub), glyph=glyph,
-                    group=group, fill=None, path='', **kw)
+        row = dict(kind='help', name=name, dir=sub, title=name, about=kw.pop('about', sub), glyph=glyph,
+                   group=group, fill=None, path='')
+        row.update(kw)                              # e.g. fill=, action=, app=
+        return row
 
     # image mode
     def _image_intro(self):
@@ -773,6 +794,12 @@ class QuickBar:
     def _results(self, seq, q, rows, keep=False):
         if seq != self._seq:
             return
+        if not q and self._mode == 'search':
+            if self._sv == 'empty':
+                rows = []
+            elif self._sv == 'both' and self._last_q:
+                rows = [self._note(self._last_q, 'Your last search · Enter searches it again', '↺', 'Last search',
+                                   fill=self._last_q)] + rows
         cur = self._current() if keep else None
         self._rows, self._q_shown, self._sel = rows, q, 0
         if not q and self._mode == 'search':
@@ -998,7 +1025,7 @@ class QuickBar:
         for m in MODES:
             on = m == self._mode
             if on:
-                self._round_rect(x, cy - size // 2, x + size, cy + size // 2, p(8), c['sel'])
+                self._round_rect(x, cy - size // 2, x + size, cy + size // 2, p(3), c['sel'])
             col = c['ink'] if on else c['muted']
             mx, my = x + size // 2, cy
             if m == 'search':
@@ -1051,7 +1078,7 @@ class QuickBar:
         rh = p(ROW)
         if i == self._sel:
             x1, x2 = p(8), w - p(8)
-            self._round_rect(x1, y + p(1), x2, y + rh - p(1), p(6), c['sel'])
+            self._round_rect(x1, y + p(1), x2, y + rh - p(1), p(3), c['sel'])
             cv.create_rectangle(x1, y + p(10), x1 + p(2), y + rh - p(10), fill=c['ink'], outline='')
         ix, iy = p(30), y + rh // 2
         img = self._icon(r)
@@ -1127,7 +1154,7 @@ class QuickBar:
         if d is None:
             cv.create_text(bx + inner // 2, by + box_h // 2, text='…', fill=c['muted'], font=self.f_name)
         elif d.get('text') is not None:
-            self._round_rect(bx, by, bx + inner, by + box_h, p(6), c['card'])
+            self._round_rect(bx, by, bx + inner, by + box_h, p(3), c['card'])
             lh = self.f_path.metrics('linespace')
             ty = by + p(10)
             for line in d['text'].expandtabs(4).splitlines()[:max(1, (box_h - p(20)) // lh)]:
@@ -1164,7 +1191,7 @@ class QuickBar:
         """A website: its icon, title, address and how often you went there."""
         cv, c, p = self.cv, self.c, self._px
         tile = p(64)
-        self._round_rect(bx, by, bx + tile, by + tile, p(14), '#FFFFFF')   # most site icons are drawn for white
+        self._round_rect(bx, by, bx + tile, by + tile, p(3), '#FFFFFF')   # most site icons are drawn for white
         img = (d or {}).get('img') or self._icon(r)
         if img:
             cv.create_image(bx + tile // 2, by + tile // 2, image=img)

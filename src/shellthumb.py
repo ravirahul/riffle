@@ -138,7 +138,9 @@ def icon(path, ext, size=32):
         if key in _icons:
             _icons.move_to_end(key)
             return _icons[key]
-    png = image(path, size, icon_only=True)
+    png = image(path, size, icon_only=True) or image(path, size, icon_only=True)   # one retry: bursts can fail
+    if not png:
+        return None                     # never remember a failure, or every file of this type stays blank
     with _lock:
         _icons[key] = png
         while len(_icons) > 400:

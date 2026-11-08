@@ -112,8 +112,9 @@ $(".main .head").insertAdjacentHTML("beforebegin", `<div class="homebar">${ICO.s
   <b>Recently changed</b><span>Your newest files. Start typing to search everything.</span><span class="kb">Ctrl K</span></div>`);
 
 /* ── settings dialog ───────────────────────────────────────── */
-const TABS = [["pro", "Riffle Pro"], ["general", "General"], ["search", "Search"], ["index", "Index"], ["clean", "Duplicates & clean up"],
+const TABS = [["pro", "Riffle Pro"], ["general", "General"], ["search", "Search"], ["quick", "Quick bar"], ["index", "Index"], ["clean", "Duplicates & clean up"],
               ["visual", "Visual search"], ["about", "About"]];
+ICO.quick = '<svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="8" cy="12" r="2"/><path d="M11 12h6"/></svg>';
 ICO.pro = '<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/></svg>';
 document.body.insertAdjacentHTML("beforeend", `
 <div class="dlg set" id="set" role="dialog" aria-modal="true" aria-label="Settings">
@@ -164,30 +165,49 @@ document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key === ","){ e.preventDefault(); $("#set").classList.contains("on") ? closeSettings() : openSettings(); }
 }, true);
 
+const quickOpen = new Set(["qaLook", "qaStart"]);   // which Quick bar accordions are open
+document.addEventListener("toggle", e => {
+  const d = e.target; if (!d.classList || !d.classList.contains("sacc")) return;
+  d.open ? quickOpen.add(d.id) : quickOpen.delete(d.id);
+}, true);
+document.addEventListener("input", e => { if (e.target.id === "sQTint") $("#sQTintV").textContent = e.target.value + "%"; });
 function paintSettings(){
   if (!SV) return;
   const s = SET, ix = SV.index;
   $("#setVer").textContent = "Riffle " + (SV.version || "");
 
+  // the quick bar's own settings, each group in its own accordion
+  const acc = (id, title, body) => `<details class="sacc" id="${id}" ${quickOpen.has(id) ? "open" : ""}><summary>${title}</summary>${body}</details>`;
+  const seg = (id, cur, opts) => `<div class="seg2" id="${id}">${opts.map(([v, l]) =>
+      `<button data-v="${v}" aria-pressed="${cur === v}">${l}</button>`).join("")}</div>`;
+  $("#sp-quick").innerHTML =
+    acc("qaLook", "Look",
+      row("Style", "Glass needs Windows 11. Windows turns it solid while Energy saver is on.",
+          seg("sLook", s.quickLook || "paper", [["paper", "Paper"], ["glass", "Glass"]]))
+      + row("Transparency", "How much of what's behind shows through Glass.",
+          `<span class="rng"><input type="range" id="sQTint" min="0" max="100" step="5" value="${s.quickTint ?? 40}"
+             aria-label="Glass transparency" ${(s.quickLook || "paper") === "glass" ? "" : "disabled"}><output id="sQTintV">${s.quickTint ?? 40}%</output></span>`)
+      + row("Preview beside results", "A picture or the first lines of the selected file.", sw("sQPrev", s.quickPreview !== false)))
+    + acc("qaKey", "Hotkey",
+      row("Summon hotkey", SV.hotkey.ok ? `Press it anywhere to open Riffle.`
+            : `<span class="warn">${esc(keyLabel(s.hotkey))} is already used by another app. Pick another.</span>`,
+          `<select id="sHotkey">${SV.hotkeys.map(k => `<option value="${k}" ${k === s.hotkey ? "selected" : ""}>${esc(keyLabel(k))}</option>`).join("")}</select>`)
+      + row("The hotkey opens", "The quick bar appears instantly over any app; the full window is this one.",
+          seg("sOpens", s.hotkeyOpens || "bar", [["bar", "Quick bar"], ["window", "Full window"]])))
+    + acc("qaStart", "When it opens",
+      row("Show", "What the quick bar shows before you type.",
+          seg("sQStart", s.quickStart || "recent", [["empty", "Nothing"], ["recent", "Recent files"], ["last", "Last search"], ["both", "Both"]])))
+    + acc("qaShow", "Show in results",
+      row("Apps", "Start menu and Microsoft Store apps.", sw("sQApps", s.quickApps !== false))
+      + row("Windows settings", "Pages like Bluetooth, Wi-Fi and Display.", sw("sQSet", s.quickSettings !== false))
+      + row("Browser history", "Pages and bookmarks from Chrome, Edge, Brave, Opera, Vivaldi and Firefox. Read on this PC only.", sw("sQHist", s.quickHistory !== false))
+      + row("Web search", "Open addresses you type, a search row at the end, and shortcuts: g, yt, maps, wiki.", sw("sQWeb", s.quickWeb !== false))
+      + row("Search engine", "", `<select id="sEngine">${[["google", "Google"], ["bing", "Bing"], ["duckduckgo", "DuckDuckGo"]].map(([v, l]) =>
+            `<option value="${v}" ${(s.searchEngine || "google") === v ? "selected" : ""}>${l}</option>`).join("")}</select>`)
+      + row("Voice search", "Speak instead of typing: press → in the quick bar. Works offline, nothing is recorded or sent.", voiceCtl()));
+
   $("#sp-general").innerHTML =
-    row("Summon hotkey", SV.hotkey.ok ? `Press it anywhere to open Riffle.`
-          : `<span class="warn">${esc(keyLabel(s.hotkey))} is already used by another app. Pick another.</span>`,
-        `<select id="sHotkey">${SV.hotkeys.map(k => `<option value="${k}" ${k === s.hotkey ? "selected" : ""}>${esc(keyLabel(k))}</option>`).join("")}</select>`)
-    + row("The hotkey opens", "The quick bar is a small search box that appears instantly over any app.",
-        `<div class="seg2" id="sOpens">${[["bar", "Quick bar"], ["window", "Full window"]].map(([v, l]) =>
-          `<button data-v="${v}" aria-pressed="${(s.hotkeyOpens || "bar") === v}">${l}</button>`).join("")}</div>`)
-    + row("Preview in the quick bar", "A picture or the first lines of the selected file, beside the results.", sw("sQPrev", s.quickPreview !== false))
-    + row("Quick bar look", "Glass needs Windows 11.", `<div class="seg2" id="sLook">${[["paper", "Paper"], ["glass", "Glass"]].map(([v, l]) =>
-          `<button data-v="${v}" aria-pressed="${(s.quickLook || "paper") === v}">${l}</button>`).join("")}</div>`)
-    + row("Apps in the quick bar", "Start menu and Microsoft Store apps.", sw("sQApps", s.quickApps !== false))
-    + row("Windows settings in the quick bar", "Pages like Bluetooth, Wi-Fi and Display.", sw("sQSet", s.quickSettings !== false))
-    + row("Browser history in the quick bar", "Pages and bookmarks from Chrome, Edge, Brave, Opera, Vivaldi and Firefox. Read on this PC only.", sw("sQHist", s.quickHistory !== false))
-    + row("Web search in the quick bar", "Open addresses you type, a search row at the end, and shortcuts: g, yt, maps, wiki.", sw("sQWeb", s.quickWeb !== false))
-    + row("Voice search in the quick bar", "Speak instead of typing: press → in the quick bar. Works offline, nothing is recorded or sent.",
-          voiceCtl())
-    + row("Search engine", "", `<select id="sEngine">${[["google", "Google"], ["bing", "Bing"], ["duckduckgo", "DuckDuckGo"]].map(([v, l]) =>
-          `<option value="${v}" ${(s.searchEngine || "google") === v ? "selected" : ""}>${l}</option>`).join("")}</select>`)
-    + row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
+    row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
           : "Available in the installed app.", sw("sAuto", SV.autostart, !SV.canAutostart))
     + row("Theme", "", `<div class="seg2" id="sTheme">${["system", "light", "dark"].map(t =>
           `<button data-v="${t}" aria-pressed="${s.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`)
@@ -270,6 +290,7 @@ $("#set").addEventListener("change", e => {
                 sQApps:"quickApps", sQSet:"quickSettings", sQHist:"quickHistory", sQWeb:"quickWeb", sEngine:"searchEngine" };
   if (map[id]) return saveSetting({ [map[id]]:v });
   if (id === "sAuto") return saveSetting({}, { autostart:v });
+  if (id === "sQTint") return saveSetting({ quickTint:+v });
   if (id === "sDMin"){ $("#dMin").value = v; return saveSetting({ dupesMin:+v }); }
   const num = { sDl:"cleanDownloadsDays", sInst:"cleanInstallerDays", sBig:"cleanBigMB" }[id];
   if (num && e.target.value !== "") return saveSetting({ [num]:+e.target.value });
@@ -279,6 +300,7 @@ $("#set").addEventListener("click", async e => {
   if (b.closest("#sTheme")) return saveSetting({ theme:b.dataset.v });
   if (b.closest("#sOpens")) return saveSetting({ hotkeyOpens:b.dataset.v });
   if (b.closest("#sLook")) return saveSetting({ quickLook:b.dataset.v });
+  if (b.closest("#sQStart")) return saveSetting({ quickStart:b.dataset.v });
   if (b.closest("#sMode")){
     document.querySelector(`.seg [data-mode="${b.dataset.v}"]`).click();
     return paintSettings();

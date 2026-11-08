@@ -2369,6 +2369,8 @@ def start_quickbar(url):
         clip_image=clip_image,
         voice_start=voice_start,
         voice_stop=voice_stop,
+        tint=lambda: features.settings().get('quickTint', 40),
+        start_view=lambda: features.settings().get('quickStart', 'recent'),
     )
     bar.start()
     if contentsearch.available():
