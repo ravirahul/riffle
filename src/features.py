@@ -686,13 +686,13 @@ def _findings(eng, ix, ids, size, mtime, extv, par, dirs, ndirs, exts, cat_slot,
         if dlow[int(par[j])].rstrip('\\') + '\\' + stem in have:
             unz[j] = True
     add('unzipped', 'Zip files you already unzipped',
-        'A folder with the same name sits right next to each one, so the zip is a spare copy.',
+        'Each has a same-name folder next to it.',
         unz, {'exts': ['zip', 'rar', '7z'], 'sort': 'size'})
     # 2. downloads nobody touched in 3 months
-    add('olddl', 'Old downloads', 'Files in Downloads that haven’t changed in 3 months.',
+    add('olddl', 'Old downloads', 'Untouched for 3 months.',
         in_dl & (mtime < now - 90 * 86400), {'scope': os.path.join(home, 'Downloads'), 'timeMax': int(now - 90 * 86400)})
     # 3. installers that already did their job
-    add('installers', 'Old installers', 'Setup files in Downloads older than 2 weeks. The apps they installed stay.',
+    add('installers', 'Old installers', 'Setup files over 2 weeks old. The apps stay.',
         in_dl & np.isin(extv, ext_ids({'exe', 'msi', 'msix', 'appx'})) & (mtime < now - 14 * 86400),
         {'scope': os.path.join(home, 'Downloads'), 'exts': ['exe', 'msi', 'msix', 'appx']})
     # 4. screenshots piling up
@@ -700,7 +700,7 @@ def _findings(eng, ix, ids, size, mtime, extv, par, dirs, ndirs, exts, cat_slot,
     add('shots', 'Screenshots', 'Screenshots saved on this PC.',
         shot & (cat_slot == FILE_CATS.index('image')), {'q': 'screenshot', 'cats': ['image']})
     # 5. big videos untouched for a year
-    add('oldvideo', 'Big videos you haven’t touched in a year', 'Videos over 500 MB, unchanged for 12 months.',
+    add('oldvideo', 'Big videos untouched for a year', 'Over 500 MB each.',
         (cat_slot == FILE_CATS.index('video')) & (size > 500 << 20) & (mtime < now - 365 * 86400),
         {'cats': ['video'], 'timeMax': int(now - 365 * 86400), 'sizeMin': 500 << 20})
     out.sort(key=lambda f: -f['bytes'])

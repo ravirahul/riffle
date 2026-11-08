@@ -20,7 +20,7 @@ document.querySelector(".body").insertAdjacentHTML("beforeend", `
   <div class="pane-in">
     <div class="ins-head">
       <div class="t"><h1>What's on <span class="mk">this PC</span></h1>
-        <p class="lede">Counted from Riffle's index, so nothing is opened or uploaded. Click anything to see those files.</p></div>
+        <p class="lede">Click anything to see those files.</p></div>
       <label class="qs"><label class="sw"><input type="checkbox" id="insAll"><i></i></label>
         <span>Include system files<small>Only for Insights</small></span></label>
     </div>
@@ -82,7 +82,7 @@ function goSearch({ cats = [], exts = [], scope = "", timeMin = null, timeMax = 
 /* ── render ──────────────────────────────────────────────── */
 function paintInsights(){
   const d = ins.data, T = d.totals;
-  $("#insMeta").textContent = `${d.all ? "Everything Riffle indexed" : "Your files (system and hidden files left out)"} · counted in ${d.ms} ms`;
+  $("#insMeta").textContent = `${d.all ? "Everything indexed" : "Your files, without system and hidden ones"}`;
   const types = d.types.filter(t => t.files);
   const tot = ins.mode === "bytes" ? T.bytes : T.files;
   const val = t => ins.mode === "bytes" ? t.bytes : t.files;
@@ -108,7 +108,7 @@ function paintInsights(){
       <span class="n">${CATN[t.cat]}</span><span class="v">${show(val(t))}</span><span class="p">${pct(val(t), tot).toFixed(0)}%</span></button>`).join("")}</div></div>`;
 
   // extension bubbles
-  h += `<div class="icard"><h3>Extensions</h3><p class="sub">Bubble size is the space each extension takes. Colour is its type.</p>
+  h += `<div class="icard"><h3>Extensions</h3><p class="sub">Bigger bubble, more space.</p>
     <div class="bubbles" id="insBub"></div></div>`;
 
   // locations
@@ -121,29 +121,29 @@ function paintInsights(){
   // age
   const amax = Math.max(...d.age.map(a => a.bytes), 1);
   const ageDays = [[0, 7], [7, 30], [30, 182], [182, 365], [365, 730], [730, 36500]];
-  h += `<div class="icard"><h3>Age of your data</h3><p class="sub">Space by when files last changed.</p>
+  h += `<div class="icard"><h3>Age of your data</h3><p class="sub">By last change.</p>
     <div class="hbars">${d.age.map((a, i) => `<button class="hbar" data-age="${i}"
       data-tip="<b>${a.label}</b><br><span>${fmtN(a.files)} files · ${fmtSize(a.bytes)}</span>">
       <span class="lab">${a.label}</span><span class="track"><i style="width:${pct(a.bytes, amax)}%;background:var(--heat-${Math.min(5, 5 - i + 0) || 1})"></i></span><span class="val">${fmtSize(a.bytes)}</span></button>`).join("")}</div>
     ${year ? `<div class="callout"><span><b>${fmtSize(year)}</b> hasn't changed in a year${old ? `, ${fmtSize(old)} of it in over two` : ""}.</span><button class="btn" data-goclean>Clean up</button></div>` : ""}</div>`;
 
   // activity calendar
-  h += `<div class="icard wide"><h3>Activity</h3><p class="sub">Files changed each day over the last year. Click a day to see them.</p>
+  h += `<div class="icard wide"><h3>Activity</h3><p class="sub">Files changed per day, last year.</p>
     <div class="cal" id="insCal"></div>
     <div class="heat-key">Less ${[0, 1, 2, 3, 4, 5].map(i => `<i style="background:var(--heat-${i})"></i>`).join("")} More</div></div>`;
 
   // folder map
   const m = d.map;
   h += `<div class="icard wide"><h3>Folder map<span class="sp"></span><span class="crumbs" id="insCrumbs"></span></h3>
-    <p class="sub">Each block is a folder sized by the space inside it and coloured by its main file type. Click to look inside.</p>
+    <p class="sub">Click a folder to look inside.</p>
     <div class="fmap" id="insMap"></div></div>`;
 
   // top lists
-  h += `<div class="icard"><h3>Biggest files</h3><p class="sub">Click to show in Explorer.</p><div class="toplist">${d.biggest.slice(0, 10).map(b => {
+  h += `<div class="icard"><h3>Biggest files</h3><div class="toplist">${d.biggest.slice(0, 10).map(b => {
       const nm = b.path.split("\\").pop(), dir = b.path.slice(0, b.path.length - nm.length - 1);
       return `<button data-reveal="${esc(b.path)}"><span class="dot" style="background:${ccol(b.cat)}"></span>
         <span class="nm">${esc(nm)}<small><bdi>${esc(dir)}</bdi></small></span><span class="val">${fmtSize(b.size)}</span></button>`; }).join("")}</div></div>`;
-  h += `<div class="icard"><h3>Busiest folders</h3><p class="sub">Most files sitting directly inside.</p><div class="toplist">${d.folders.slice(0, 10).map(f =>
+  h += `<div class="icard"><h3>Busiest folders</h3><p class="sub">Most files directly inside.</p><div class="toplist">${d.folders.slice(0, 10).map(f =>
       `<button data-scope="${esc(f.path)}"><span class="dot" style="background:var(--rule-2)"></span>
         <span class="nm">${esc(f.path.split("\\").filter(Boolean).pop() || f.path)}<small><bdi>${esc(f.path)}</bdi></small></span><span class="val">${fmtN(f.files)}</span></button>`).join("")}</div></div>`;
 
@@ -157,8 +157,8 @@ function biggestType(types, tot, val){
   const t = [...types].sort((a, b) => val(b) - val(a))[0];
   const share = pct(val(t), tot), cnt = pct(t.files, types.reduce((a, b) => a + b.files, 0));
   return ins.mode === "bytes"
-    ? `${CATN[t.cat]} take ${share.toFixed(0)}% of the space while being ${cnt.toFixed(0)}% of the files.`
-    : `${CATN[t.cat]} are the most common: ${share.toFixed(0)}% of all files.`;
+    ? `${CATN[t.cat]}: ${share.toFixed(0)}% of the space, ${cnt.toFixed(0)}% of the files.`
+    : `${CATN[t.cat]}: ${share.toFixed(0)}% of all files.`;
 }
 
 /* bubbles: biggest first, each placed touching earlier ones, as close to centre as fits */

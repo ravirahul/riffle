@@ -177,11 +177,11 @@ paintInsights = (orig => function(){
   const grid = $("#insOut .igrid"); if (!grid) return;
   let h = `<div class="icard wide hist-card"><h3>Disk growth<span class="sp"></span>${d.historyLocked ? `<span class="pill lbl-review">Pro</span>` : ""}</h3>`;
   if (d.historyLocked){
-    h += `<p class="sub">Riffle notes your totals once a day. ${d.historyDays ? `${d.historyDays} day${d.historyDays === 1 ? "" : "s"} recorded so far.` : "Recording starts today."}</p>
+    h += `<p class="sub">${d.historyDays ? `${d.historyDays} day${d.historyDays === 1 ? "" : "s"} recorded so far.` : "Recording starts today."}</p>
       <div class="hist-lock"><svg viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true"><path d="M0 100 C80 95 120 80 200 78 S330 60 400 52 S520 30 600 20 L600 120 L0 120Z"/></svg>
       <button class="btn ink" id="histPro">${PRO_ICON} See your history with Riffle Pro</button></div>`;
   } else if ((d.history || []).length < 2){
-    h += `<p class="sub">Riffle notes your totals once a day. Come back in a few days to see the trend.</p>`;
+    h += `<p class="sub">The trend shows after a few days.</p>`;
   } else {
     const H = d.history, W = 900, Ht = 160, pad = 4;
     const max = Math.max(...H.map(r => r.bytes)), min = Math.min(...H.map(r => r.bytes));

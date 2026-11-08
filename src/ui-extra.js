@@ -236,8 +236,8 @@ const dupes = {
     const out = $("#dOut");
     if (!this.groups.length){
       out.innerHTML = this.finished
-        ? `<div class="blank"><b>No duplicates found</b>Nothing over the size limit has an identical copy. Try a smaller minimum size.</div>`
-        : `<div class="blank"><b>Find files that are stored twice</b>Riffle compares contents, not names, so renamed copies are caught too.<br>It reads only files that share an exact size, at low priority, and remembers what it has checked.</div>`;
+        ? `<div class="blank"><b>No duplicates found</b>Try a smaller minimum size.</div>`
+        : `<div class="blank"><b>Find files stored twice</b>Press Scan to start.</div>`;
       return;
     }
     let waste = 0;
@@ -346,7 +346,7 @@ const clean = {
   paint(){
     const out = $("#cOut"), s = this.data;
     if (!s || !s.cards || !s.cards.length){
-      out.innerHTML = `<div class="blank"><b>See what's safe to clear</b>Riffle looks at temp files, caches, old installers, forgotten downloads, rebuildable project folders and more. Nothing is removed until you choose.</div>`;
+      out.innerHTML = `<div class="blank"><b>See what's safe to clear</b>Nothing is removed until you choose.</div>`;
       return;
     }
     const total = s.cards.filter(c => !c.done).reduce((a, c) => a + c.size, 0);

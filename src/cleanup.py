@@ -228,30 +228,25 @@ def build_report(records, dupe_groups=(), progress=lambda s: None, junk_dirs=(),
 
     cards = [
         _card('dupes', 'Duplicate copies',
-              'Extra copies found by the duplicate scan. One copy of each file is always kept.',
-              'recycle', dupes, note='' if dupe_groups else 'Run a duplicate scan to fill this in.'),
-        _card('temp', 'Temporary files', 'Files in your Temp folder older than 2 days. Apps make '
-              'these while running and leave them behind.', 'delete', temp,
-              note='Deleted permanently; files in use are skipped.'),
-        _card('caches', 'Browser and app caches', 'Saved copies of web pages and app data. They '
-              'rebuild themselves as you browse.', 'delete', caches,
-              note='Deleted permanently. Close your browser first to clear the most.'),
-        _card('installers', 'Old installers', f'Setup files in Downloads older than {_days(inst_days)}. '
-              'Once installed, the app no longer needs them.', 'recycle', installers),
-        _card('dev', 'Rebuildable project folders', 'node_modules, venv, caches and build '
-              'output in projects untouched for 3 months.', 'delete', dev,
-              note='Deleted permanently. Get them back with npm install, pip install or a rebuild.'),
-        _card('downloads', 'Old downloads', f'Files in Downloads you haven\'t changed in {_days(dl_days)}.',
+              'Extra copies. One of each is kept.',
+              'recycle', dupes, note='' if dupe_groups else 'Run a duplicate scan first.'),
+        _card('temp', 'Temporary files', 'Left behind by apps, over 2 days old.', 'delete', temp,
+              note='Deleted permanently.'),
+        _card('caches', 'Browser and app caches', 'Apps rebuild these as needed.', 'delete', caches,
+              note='Deleted permanently. Close your browser first.'),
+        _card('installers', 'Old installers', f'Setup files over {_days(inst_days)} old.', 'recycle', installers),
+        _card('dev', 'Rebuildable project folders', 'node_modules, venv and builds untouched for 3 months.', 'delete', dev,
+              note='Deleted permanently. A rebuild brings them back.'),
+        _card('downloads', 'Old downloads', f'Untouched for {_days(dl_days)}.',
               'recycle', old_dl, level='review'),
-        _card('big', 'Big, old files', f'Files over {opts.get("cleanBigMB", 500):,} MB not changed in a year.',
+        _card('big', 'Big, old files', f'Over {opts.get("cleanBigMB", 500):,} MB, untouched for a year.',
               'recycle', big_old, level='review'),
         _card('screenshots', 'Old screenshots', 'Screenshots older than 6 months.',
               'recycle', screenshots, level='review'),
-        _card('empty', 'Empty files', 'Zero-byte files in your own folders.', 'recycle', zero,
+        _card('empty', 'Empty files', 'Zero-byte files.', 'recycle', zero,
               level='review'),
     ]
-    cards.append({'key': 'bin', 'title': 'Recycle Bin', 'why': 'Everything you deleted earlier '
-                  'still takes space until the bin is emptied.', 'action': 'empty_bin',
+    cards.append({'key': 'bin', 'title': 'Recycle Bin', 'why': 'Deleted files still take space here.', 'action': 'empty_bin',
                   'level': 'safe', 'note': '', 'count': bin_items, 'size': bin_size, 'items': []})
     return {'time': now, 'cards': [c for c in cards if c['count'] or (c['key'] == 'dupes' and not dupe_groups)]}
 

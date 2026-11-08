@@ -610,7 +610,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
     <section class="pane" id="dupesPane" aria-label="Duplicate files">
       <div class="pane-in">
         <h1>Find <span class="mk">duplicates</span></h1>
-        <p class="lede">Files with identical contents, even when they have different names. One copy of each is always kept, and removed copies go to the Recycle Bin.</p>
+        <p class="lede">Exact copies, even renamed. One of each is always kept.</p>
         <div class="ctrls">
           <label>Smallest file
             <select id="dMin">
@@ -620,13 +620,12 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
               <option value="104857600">100 MB</option>
             </select>
           </label>
-          <label>Only in these folders (optional)
+          <label>Folders (optional)
             <input id="dScope" placeholder="C:\Users\you\Pictures; D:\Backup" spellcheck="false">
           </label>
           <button class="btn ink big" id="dScan">Scan for duplicates</button>
           <button class="btn big" id="dStop" hidden>Stop</button>
         </div>
-        <div class="hint">App, system and code-library folders are skipped so nothing an app needs is offered for removal.</div>
         <div class="progress" id="dProg"><div class="bar"><i></i></div><div class="lbl"></div></div>
         <div id="dOut"></div>
       </div>
@@ -635,7 +634,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
     <section class="pane" id="cleanPane" aria-label="Clean up">
       <div class="pane-in">
         <h1>Clean <span class="mk">up</span></h1>
-        <p class="lede">Space you can get back, with the reason for each. Your own files go to the Recycle Bin. Caches and temp files are deleted, because apps rebuild them.</p>
+        <p class="lede">Space you can get back. Your files go to the Recycle Bin.</p>
         <div class="ctrls"><button class="btn ink big" id="cScan">Check this PC</button></div>
         <div class="progress" id="cProg"><div class="bar indet"><i></i></div><div class="lbl"></div></div>
         <div id="cOut"></div>
@@ -647,7 +646,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
           <span id="smapTotal" style="font-family:var(--mono);font-size:12px;color:var(--ink-2)"></span>
         </div>
         <div class="smap" id="smap"></div>
-        <div class="hint" style="margin-top:6px">Click a block to look inside. Sizes come from the index, so system and library folders Riffle skips aren't counted.</div>
+        <div class="hint" style="margin-top:6px">Click a block to look inside.</div>
       </div>
     </section>
   </div>

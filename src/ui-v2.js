@@ -350,9 +350,16 @@ $("#inote").addEventListener("click", e => {
   const b = e.target.closest("[data-in]"); if (!b) return;
   document.querySelector(`.seg [data-mode="${b.dataset.in === "inside" ? "content" : "substring"}"]`)?.click();
 });
+let lastQ = null;
 runSearch = (orig => async function(){
+  const q = state.q.trim(), before = state.sel;
   await orig();
-  if (!state.q.trim() && state.sel >= 0){ state.sel = -1; state.anchor = -1; render(); showPreview(true); }  // nothing chosen yet: no preview
+  // Empty box: nothing is chosen until you pick a file. Only on arriving at an empty box (or a refresh that
+  // found nothing chosen); a background refresh must never drop a file you picked.
+  if (!q && state.sel >= 0 && (lastQ !== "" || before < 0)){
+    state.sel = -1; state.anchor = -1; render(); showPreview(true);
+  }
+  lastQ = q;
   inote(); syncChips();
 })(runSearch);
 
@@ -610,7 +617,11 @@ $("#pvInfo").addEventListener("click", e => {
   const t = e.target.closest("[data-trail]");
   if (t) return openPath(t.dataset.trail);
   const d = e.target.closest("[data-v2dots]");
-  if (d){ const r = d.getBoundingClientRect(); openMenu(r.left - 160, r.bottom + 4); }
+  if (d){
+    e.stopPropagation();                         // the page closes menus on any outside click: don't let this one count
+    const r = d.getBoundingClientRect();
+    openMenu(Math.max(8, r.right - 220), r.bottom + 4);
+  }
 });
 
 /* ── 9. Insights: "Worth a look" findings, and a folder map that starts where the space is ── */
@@ -628,13 +639,12 @@ if (typeof paintInsights === "function"){
       setTimeout(() => loadInsights(true));          // after this load finishes, or it is ignored
     }
     if (ins.autoMap && d.map.root === ins.autoMap.root && $("#insMap")){
-      $("#insMap").insertAdjacentHTML("beforebegin", `<p class="mapnote">${esc(ins.autoMap.name)} holds ${ins.autoMap.pct}% of the space,
-        so the map opens inside it. Use the path above to go back.</p>`);
+      $("#insMap").insertAdjacentHTML("beforebegin", `<p class="mapnote">${esc(ins.autoMap.name)} holds ${ins.autoMap.pct}% of the space, so the map starts there.</p>`);
     }
     const f = d.findings || [];
     const total = f.reduce((a, x) => a + x.bytes, 0);
     const html = f.length ? `<section class="worth" aria-label="Worth a look">
-      <div class="whead"><h2>Worth a look</h2><span>Up to ${fmtSize(total)} you may not need. Nothing is removed until you say so.</span></div>
+      <div class="whead"><h2>Worth a look</h2><span>Up to ${fmtSize(total)} you may not need.</span></div>
       <div class="wgrid">${f.map((x, i) => `<article class="wcard">
         <div class="wtop"><b>${esc(x.title)}</b><big>${fmtSize(x.bytes)}</big></div>
         <p>${esc(x.why)}</p>
@@ -660,56 +670,43 @@ if (typeof paintInsights === "function"){
 /* ── 8. Settings › Guide: how everything works, in one place ─────────────── */
 const GUIDE_ICO = '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2zM4 5v16M8 7h7M8 11h5"/></svg>';
 const k = s => `<kbd class="kb">${s}</kbd>`;
-TABS.splice(TABS.findIndex(t => t[0] === "general") + 1, 0, ["guide", "Guide"]);    // the dialog's title comes from TABS
+TABS.splice(TABS.findIndex(t => t[0] === "about"), 0, ["guide", "Guide"]);    // just above About; the dialog title comes from TABS
 ICO.guide = GUIDE_ICO;
-document.querySelector('#set [data-tab="general"]').insertAdjacentHTML("afterend",
+document.querySelector('#set [data-tab="about"]').insertAdjacentHTML("beforebegin",
   `<button role="tab" data-tab="guide" aria-selected="false">${GUIDE_ICO}Guide</button>`);
-document.querySelector("#sp-general").insertAdjacentHTML("afterend", `<div class="set-pane guide" id="sp-guide" role="tabpanel" hidden>
-  <h2>How to use Riffle</h2>
-  <p class="lede2">Everything below works offline. Nothing leaves your PC unless you choose a web search.</p>
-
-  <h3>Search from anywhere</h3>
+const krow = (keys, what) => `<dt>${keys}</dt><dd>${what}</dd>`;
+document.querySelector("#sp-about").insertAdjacentHTML("beforebegin", `<div class="set-pane guide" id="sp-guide" role="tabpanel" hidden>
+  <h3>Quick bar</h3>
   <ul>
-    <li>Press ${k("Ctrl")} ${k("Shift")} ${k("Space")} in any app. The quick bar opens over whatever you are doing.</li>
-    <li>Type part of a name. The best match comes first as <b>Top hit</b>, then <b>Apps</b>, <b>Settings</b>, <b>Files</b>,
-        <b>Websites</b> from your browser history, and documents with your words <b>inside</b> them.</li>
-    <li>${k("↵")} opens · ${k("Ctrl")} ${k("↵")} shows it in its folder · ${k("Ctrl")} ${k("C")} copies the path ·
-        ${k("Tab")} continues in this window · ${k("Esc")} closes. Type ${k("?")} for examples.</li>
-    <li>Riffle learns what you open, so your usual picks rise to the top.</li>
+    <li>Press <span id="gHot">${k("Ctrl")} ${k("Shift")} ${k("Space")}</span> anywhere, then type. Apps, settings, files and sites show up together.</li>
+    <li>Try <i>wifi</i>, <i>18% of 4500</i>, <i>github.com</i> or <i>yt lofi</i>. Type ${k("?")} for more.</li>
+    <li>${k("←")} ${k("→")} in an empty box switch to Image or Voice search.</li>
   </ul>
-
-  <h3>Three ways to search: Search · Image · Voice</h3>
-  <ul>
-    <li>When the box is empty, press ${k("←")} ${k("→")} (or click the icons in the box) to switch.</li>
-    <li><b>Image</b> finds the original of a picture, other copies and look-alikes. Press ${k("↓")} to choose a file,
-        or ${k("Ctrl")} ${k("V")} to paste a copied picture or screenshot. Set its folders under <b>Visual search</b>.</li>
-    <li><b>Voice</b> types as you speak and searches as you go. Pause when you are done; ${k("Esc")} stops.
-        Add it once under <b>Settings › Quick bar › Show in results</b> (65 MB, works offline).</li>
-  </ul>
-
-  <h3>What you can type</h3>
-  <ul>
-    <li>A setting: <i>bluetooth</i>, <i>wifi</i>, <i>dark mode</i>, <i>uninstall</i>.</li>
-    <li>A sum: <i>12*(3+4)</i> or <i>18% of 4,500</i>. ${k("↵")} copies the answer.</li>
-    <li>A website: <i>github.com</i> opens it. Shortcuts: <i>yt lofi</i>, <i>g weather</i>, <i>maps cafe</i>, <i>wiki goa</i>.</li>
-  </ul>
-
   <h3>This window</h3>
   <ul>
-    <li>The chips under the box narrow by type. The sidebar narrows by <b>Modified</b> date, <b>Size</b>, <b>File types</b>
-        and <b>Where</b>; drag across a graph to pick a range.</li>
-    <li>${k("Aa")} changes how names match (close enough, patterns) and shows hidden and system files.</li>
-    <li><b>List</b> is easy to read, <b>Grid</b> shows big thumbnails, <b>Details</b> is the full table with exact sizes and paths.</li>
-    <li>${k("Esc")} goes back one step at a time, to the start screen · ${k("Ctrl")} ${k("Esc")} closes the window.</li>
-    <li>${k("Space")} shows or hides the preview · ${k("Ctrl")} ${k("D")} switches dark mode · ${k("Ctrl")} ${k("K")} jumps to the box.</li>
+    <li>Narrow results with the chips or the sidebar. Drag across a graph to pick a range.</li>
+    <li>${k("Aa")} sets how names match and shows hidden files.</li>
+    <li>Duplicates and Clean up always keep one copy and use the Recycle Bin.</li>
   </ul>
-
-  <h3>Free up space</h3>
-  <ul>
-    <li><b>Duplicates</b> finds exact copies, even renamed ones. One of each is always kept.</li>
-    <li><b>Clean up</b> lists temp files, caches and old installers, each with the reason it is safe. Your files go to the Recycle Bin.</li>
-  </ul>
+  <h3>Keys</h3>
+  <dl class="pv-meta gkeys">
+    ${krow(`${k("↵")}`, "Open")}
+    ${krow(`${k("Ctrl")} ${k("↵")}`, "Show in folder")}
+    ${krow(`${k("Ctrl")} ${k("C")}`, "Copy path")}
+    ${krow(`${k("Space")}`, "Preview on or off")}
+    ${krow(`${k("Tab")}`, "Quick bar → this window")}
+    ${krow(`${k("Ctrl")} ${k("K")}`, "Search box")}
+    ${krow(`${k("Ctrl")} ${k("D")}`, "Light or dark")}
+    ${krow(`${k("Ctrl")} ${k(",")}`, "Settings")}
+    ${krow(`${k("Esc")}`, "Back one step")}
+    ${krow(`${k("Ctrl")} ${k("Esc")}`, "Close")}
+  </dl>
 </div>`);
+// show the hotkey the user actually set
+$("#set").addEventListener("click", e => {
+  if (!e.target.closest('[data-tab="guide"]') || typeof SET === "undefined" || !SET.hotkey) return;
+  $("#gHot").innerHTML = keyLabel(SET.hotkey).split(/\s*\+\s*|\s+/).filter(Boolean).map(k).join(" ");
+}, true);
 
 /* ── start ───────────────────────────────────────────────────────────────── */
 setListView(view0);

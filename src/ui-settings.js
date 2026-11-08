@@ -270,16 +270,6 @@ function paintSettings(){
          <a href="https://github.com/ravirahul/riffle" target="_blank" rel="noopener">Source on GitHub</a>
          <a href="https://github.com/ravirahul/riffle/issues" target="_blank" rel="noopener">Report a problem</a>
          <a href="https://github.com/ravirahul/riffle/releases" target="_blank" rel="noopener">What's new</a>
-       </div>`
-    + `<div class="sgroup">Keyboard</div>
-       <div class="pv-meta" style="grid-template-columns:auto 1fr;margin-top:10px">
-         <dt><kbd class="kb">${esc(keyLabel(s.hotkey))}</kbd></dt><dd>Open Riffle from anywhere</dd>
-         <dt><kbd class="kb">Ctrl K</kbd></dt><dd>Jump to the search box</dd>
-         <dt><kbd class="kb">Space</kbd></dt><dd>Preview the selected file</dd>
-         <dt><kbd class="kb">Enter</kbd></dt><dd>Open · Ctrl+Enter shows it in Explorer</dd>
-         <dt><kbd class="kb">Ctrl C</kbd></dt><dd>Copy the full path</dd>
-         <dt><kbd class="kb">Ctrl D</kbd></dt><dd>Light or dark</dd>
-         <dt><kbd class="kb">Ctrl ,</kbd></dt><dd>Settings</dd>
        </div>`;
 }
 
