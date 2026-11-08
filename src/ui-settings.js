@@ -261,7 +261,6 @@ function paintSettings(){
          <p class="mk-steps"><span>Notice</span><span>Build</span><span>Ship</span><span>Listen</span></p>
          <div class="links"><a href="https://bliink.in" target="_blank" rel="noopener">bliink.in</a>
            <span class="hint">Shelfy · Lectern · Relay · Keep · Wall · KickAsh · Flock · Bliink Links</span></div>
-         <a class="mk-credit" href="https://ravirahul.bliink.in" target="_blank" rel="noopener">by Ravi Rahul</a>
        </div>`
     + row("Your data", `Index, settings and fingerprints live in <code>${esc(SV.dataDir)}</code>. Nothing leaves this PC.`,
           `<button class="btn" id="sOpenData">Open folder</button>`)
