@@ -238,3 +238,33 @@
 .rng input{width:150px;accent-color:var(--ink)}
 .rng output{font-family:var(--mono);font-size:12px;min-width:38px;text-align:right}
 .v2grid .row.card{align-items:stretch}                 /* the picture panel fills the card */
+
+/* native dropdowns follow the theme (dark mode painted light text on a white list) */
+:root{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+select{background-color:var(--card);color:var(--ink)}
+select option,select optgroup{background-color:var(--card);color:var(--ink)}
+
+/* ── Insights: Worth a look, map note, cards keep their own height ────────── */
+.igrid{align-items:start}
+.worth{margin:18px 0 6px}
+.worth .whead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.worth h2{margin:0;font-size:16px}
+.worth .whead span{font-size:12.5px;color:var(--muted)}
+.wgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.wcard{background:var(--card);border:1px solid var(--rule);border-radius:var(--r);padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.wcard .wtop{display:flex;align-items:baseline;gap:10px}
+.wcard .wtop b{flex:1;font-size:13.5px}
+.wcard .wtop big{font-family:var(--mono);font-size:18px;font-weight:500}
+.wcard p{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.5}
+.wcard .wmeta{font-size:12px;color:var(--muted)}
+.wcard details summary{cursor:pointer;font-size:12.5px;text-decoration:underline;text-underline-offset:3px;list-style:none}
+.wcard details summary::-webkit-details-marker{display:none}
+.wcard ul{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.wcard li{display:flex;gap:8px;font-size:12px;padding:4px 6px;border-radius:var(--r);cursor:pointer}
+.wcard li:hover{background:var(--paper)}
+.wcard li span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wcard li i{font-style:normal;font-family:var(--mono);color:var(--muted)}
+.wcard .btn{align-self:flex-start;margin-top:4px}
+.mapnote{margin:-6px 0 10px;font-size:12.5px;color:var(--ink-2)}
+.icard,.tile-s,.fmap .t2{border-radius:var(--r) !important}

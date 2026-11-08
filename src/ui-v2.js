@@ -49,7 +49,7 @@ $(".qwrap").insertAdjacentHTML("beforeend", `
   </div>`);
 $(".qwrap").insertAdjacentHTML("afterend", `<button class="icobtn" id="aaBtn" aria-haspopup="true" title="Search options: how names match, hidden files">Aa</button>`);
 $("#visBtn").hidden = true;                     // image search is a mode of the box now
-$("#q").placeholder = "Search files, apps' files and words inside documents";
+$("#q").placeholder = "Search files, folders and words inside documents";
 
 /* ── 2. the filter row ───────────────────────────────────────────────────── */
 const TYPES = [["document", "Documents"], ["image", "Pictures"], ["video", "Videos"], ["audio", "Music"]];
@@ -352,9 +352,9 @@ runSearch = (orig => async function(){
 /* ── 5. start screen ─────────────────────────────────────────────────────── */
 $("#scroll").insertAdjacentHTML("beforebegin", `<div id="home" aria-label="Start">
   <section><div class="hh"><h2>Recent files</h2><span>New or changed on this PC</span>
-    <button class="lnk2" id="hAllRecent">All recent files →</button></div><ul class="hlist" id="hRecent"></ul></section>
+    <button class="lnk2" id="hAllRecent">All recent files</button></div><ul class="hlist" id="hRecent"></ul></section>
   <section><div class="hh"><h2>Jump back in</h2><span>Files you opened with Riffle</span>
-    <button class="lnk2" id="hHistory">Open history →</button></div><div id="hPicks"></div></section>
+    <button class="lnk2" id="hHistory">Open history</button></div><div id="hPicks"></div></section>
   <section><div class="hh"><h2>Quick finds</h2></div><div class="qfs" id="hQuick"></div></section>
   <section id="hSpace"><div class="hh"><h2>Free up space</h2></div><div class="spacecards">
     <button data-hv="clean"><span style="flex:1"><big id="hClean">Check</big><span>Temp files, caches and old installers you can safely remove</span></span></button>
@@ -406,7 +406,7 @@ document.addEventListener("keydown", e => {
 }, true);
 $("#q").addEventListener("input", () => { if (!$("#q").value) app.classList.remove("allrecent"); });
 let histAll = false;
-$("#hHistory").onclick = () => { histAll = !histAll; $("#hHistory").textContent = histAll ? "Fewer" : "Open history →"; paintPicks(); };
+$("#hHistory").onclick = () => { histAll = !histAll; $("#hHistory").textContent = histAll ? "Fewer" : "Open history"; paintPicks(); };
 const openPath = p => fetch("/api/act", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ action:"open", paths:[p], q:"" }) });
 const iconFor2 = r => iconURL(r);              // same Windows icons as the result list
 /* a plain page for files Windows has no icon for (e.g. files without an extension) */
@@ -605,6 +605,50 @@ $("#pvInfo").addEventListener("click", e => {
   const d = e.target.closest("[data-v2dots]");
   if (d){ const r = d.getBoundingClientRect(); openMenu(r.left - 160, r.bottom + 4); }
 });
+
+/* ── 9. Insights: "Worth a look" findings, and a folder map that starts where the space is ── */
+if (typeof paintInsights === "function"){
+  paintInsights = (orig => function(){
+    orig();
+    const d = ins.data;
+    // one folder holds most of the space: open the map inside it (once), and say so
+    const kids = (d.map && d.map.kids || []).filter(k => k.bytes > 0 && k.name !== "(files here)");
+    const big = kids.sort((a, b) => b.bytes - a.bytes)[0];
+    if (!ins.root && !ins.autoMap && big && d.map.bytes && big.bytes / d.map.bytes > 0.7){
+      ins.autoMap = { name:big.name, pct:Math.round(100 * big.bytes / d.map.bytes) };
+      ins.trail = [d.map.root]; ins.root = big.path;
+      ins.autoMap.root = big.path;
+      setTimeout(() => loadInsights(true));          // after this load finishes, or it is ignored
+    }
+    if (ins.autoMap && d.map.root === ins.autoMap.root && $("#insMap")){
+      $("#insMap").insertAdjacentHTML("beforebegin", `<p class="mapnote">${esc(ins.autoMap.name)} holds ${ins.autoMap.pct}% of the space,
+        so the map opens inside it. Use the path above to go back.</p>`);
+    }
+    const f = d.findings || [];
+    const total = f.reduce((a, x) => a + x.bytes, 0);
+    const html = f.length ? `<section class="worth" aria-label="Worth a look">
+      <div class="whead"><h2>Worth a look</h2><span>Up to ${fmtSize(total)} you may not need. Nothing is removed until you say so.</span></div>
+      <div class="wgrid">${f.map((x, i) => `<article class="wcard">
+        <div class="wtop"><b>${esc(x.title)}</b><big>${fmtSize(x.bytes)}</big></div>
+        <p>${esc(x.why)}</p>
+        <div class="wmeta">${fmtN(x.files)} file${x.files === 1 ? "" : "s"}</div>
+        <details><summary>Biggest ones</summary><ul>${x.items.map(it => `<li data-reveal="${esc(it.path)}" title="Show in folder: ${esc(it.path)}">
+          <span>${esc(it.path.split("\\").pop())}</span><i>${fmtSize(it.size)}</i></li>`).join("")}</ul></details>
+        <button class="btn" data-wk="${i}">Show them</button></article>`).join("")}</div></section>`
+      : `<section class="worth"><div class="whead"><h2>Worth a look</h2><span>Nothing big to tidy up right now.</span></div></section>`;
+    const tiles = document.querySelector("#insOut .tiles");
+    if (tiles) tiles.insertAdjacentHTML("afterend", html);
+  })(paintInsights);
+  $("#insOut").addEventListener("click", e => {
+    const b = e.target.closest("[data-wk]"); if (!b) return;
+    e.stopPropagation();
+    const a = ins.data.findings[+b.dataset.wk].action || {};
+    goSearch({ cats:a.cats || [], exts:a.exts || [], scope:a.scope || "", timeMin:a.timeMin ?? null, timeMax:a.timeMax ?? null });
+    if (a.q){ $("#q").value = a.q; state.q = a.q; }
+    if (a.sizeMin){ state.sizeMin = a.sizeMin; updateBrushLabels(); }
+    scheduleSearch(0); setTimeout(syncChips, 50);
+  }, true);
+}
 
 /* ── 8. Settings › Guide: how everything works, in one place ─────────────── */
 const GUIDE_ICO = '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2zM4 5v16M8 7h7M8 11h5"/></svg>';

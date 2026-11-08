@@ -644,6 +644,7 @@ def insights(show_all=False, root=None):
     pb = np.bincount(par, weights=size, minlength=ndirs) if ids.size else np.zeros(0)
     data['folders'] = [{'path': dirs[int(i)], 'files': int(pf[i]), 'bytes': int(pb[i])}
                        for i in np.argsort(-pf)[:15].tolist() if pf[i]]
+    data['findings'] = _findings(eng, ix, ids, size, mtime, extv, par, dirs, ndirs, exts, cat_slot, now)
     # folder map: two levels under root, coloured by each block's main type
     home = os.path.expanduser('~')
     root = root or (home if not show_all else (ix.roots[0] if ix.roots else 'C:\\'))
@@ -651,6 +652,58 @@ def insights(show_all=False, root=None):
     data['ms'] = round((time.perf_counter() - t0) * 1000)
     _insights.update(key=key, data=data)
     return data
+
+def _findings(eng, ix, ids, size, mtime, extv, par, dirs, ndirs, exts, cat_slot, now):
+    """Plain, checkable things worth a look, biggest first. Each has the files behind it."""
+    if not ids.size:
+        return []
+    home = os.path.expanduser('~')
+    dl = os.path.join(home, 'Downloads').lower()
+    dlow = [d.lower() for d in dirs[:ndirs]]
+    in_dl = np.array([d == dl or d.startswith(dl + '\\') for d in dlow], dtype=bool)[par]
+    ext_ids = lambda names: np.array([i for i, e in enumerate(exts) if e in names], dtype=np.int64)
+    out = []
+
+    def add(key, title, why, mask, action, order=None):
+        k = np.flatnonzero(mask)
+        if not k.size:
+            return
+        b = int(size[k].sum())
+        if b < 50 << 20:                            # under 50 MB is not worth anyone's time
+            return
+        top = k[np.argsort(-size[k])[:6]]
+        out.append({'key': key, 'title': title, 'why': why, 'bytes': b, 'files': int(k.size), 'action': action,
+                    'items': [{'path': dirs[int(par[j])].rstrip('\\') + '\\' + ix.name(int(ids[j])),
+                               'size': int(size[j]), 'mtime': int(mtime[j])} for j in top.tolist()]})
+
+    # 1. archives you already unzipped: a folder with the same name sits right next to the file
+    arc = np.flatnonzero(np.isin(extv, ext_ids({'zip', 'rar', '7z'})))
+    have = set(dlow)
+    unz = np.zeros(ids.size, dtype=bool)
+    for j in arc.tolist():
+        stem = os.path.splitext(ix.name(int(ids[j])))[0].lower()
+        if dlow[int(par[j])].rstrip('\\') + '\\' + stem in have:
+            unz[j] = True
+    add('unzipped', 'Zip files you already unzipped',
+        'A folder with the same name sits right next to each one, so the zip is a spare copy.',
+        unz, {'exts': ['zip', 'rar', '7z'], 'sort': 'size'})
+    # 2. downloads nobody touched in 3 months
+    add('olddl', 'Old downloads', 'Files in Downloads that haven’t changed in 3 months.',
+        in_dl & (mtime < now - 90 * 86400), {'scope': os.path.join(home, 'Downloads'), 'timeMax': int(now - 90 * 86400)})
+    # 3. installers that already did their job
+    add('installers', 'Old installers', 'Setup files in Downloads older than 2 weeks. The apps they installed stay.',
+        in_dl & np.isin(extv, ext_ids({'exe', 'msi', 'msix', 'appx'})) & (mtime < now - 14 * 86400),
+        {'scope': os.path.join(home, 'Downloads'), 'exts': ['exe', 'msi', 'msix', 'appx']})
+    # 4. screenshots piling up
+    shot = np.isin(ids, eng._ids_for(b'screenshot')) | np.isin(ids, eng._ids_for(b'screen shot'))
+    add('shots', 'Screenshots', 'Screenshots saved on this PC.',
+        shot & (cat_slot == FILE_CATS.index('image')), {'q': 'screenshot', 'cats': ['image']})
+    # 5. big videos untouched for a year
+    add('oldvideo', 'Big videos you haven’t touched in a year', 'Videos over 500 MB, unchanged for 12 months.',
+        (cat_slot == FILE_CATS.index('video')) & (size > 500 << 20) & (mtime < now - 365 * 86400),
+        {'cats': ['video'], 'timeMax': int(now - 365 * 86400), 'sizeMin': 500 << 20})
+    out.sort(key=lambda f: -f['bytes'])
+    return out
 
 def _folder_map(dirs, ndirs, par, size, cat_slot, root):
     rl = root.lower().rstrip('\\') + '\\'

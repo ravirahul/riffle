@@ -207,7 +207,7 @@ function paintSettings(){
       + row("Voice search", "Speak instead of typing: press → in the quick bar. Works offline, nothing is recorded or sent.", voiceCtl()));
 
   $("#sp-general").innerHTML =
-    row("Start with Windows", SV.canAutostart ? "Riffle waits quietly so the hotkey always works."
+    row("Start with Windows", SV.canAutostart ? "Riffle runs in the background so the hotkey always works."
           : "Available in the installed app.", sw("sAuto", SV.autostart, !SV.canAutostart))
     + row("Theme", "", `<div class="seg2" id="sTheme">${["system", "light", "dark"].map(t =>
           `<button data-v="${t}" aria-pressed="${s.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`)
@@ -218,7 +218,7 @@ function paintSettings(){
   $("#sp-search").innerHTML =
     row("Hide system and app files", "Windows, Program Files, ProgramData, AppData and the Recycle Bin stay out of results.", sw("sSys", s.hideSystem))
     + row("Hide hidden files", "Dot-folders and dot-files such as .git, .cache and .gitignore.", sw("sHid", s.hideHidden))
-    + row("Show recent files when the search box is empty", "Your newest files, ready the moment Riffle opens.", sw("sHome", s.homeRecent))
+    + row("Show recent files when the search box is empty", "Shows your newest files while the box is empty.", sw("sHome", s.homeRecent))
     + row("Default match", "", `<div class="seg2" id="sMode">${[["substring", "Contains"], ["fuzzy", "Fuzzy"], ["regex", "Regex"], ["content", "Inside"]].map(([v, l]) =>
           `<button data-v="${v}" aria-pressed="${state.mode === v}">${l}</button>`).join("")}</div>`)
     + `<div class="sgroup">Never show these folders</div>
@@ -238,7 +238,7 @@ function paintSettings(){
           `<div class="drives">${ix.drives.map(d => `<button class="chip" data-drive="${esc(d)}" aria-pressed="${roots.has(d.toUpperCase())}">${esc(d)}</button>`).join("")}</div>`)
     + row("Rebuild the index", `${esc(ix.message || "")}. Takes a minute or two, searching keeps working meanwhile.`,
           `<button class="btn" id="sRebuild">Rebuild now</button>`)
-    + `<p class="hint" style="margin-top:12px">Inside <code>node_modules</code>, <code>WinSxS</code>, <code>site-packages</code> and browser caches only the folder itself is listed, not its contents. That keeps the index small and Riffle light.</p>`;
+    + `<p class="hint" style="margin-top:12px">Inside <code>node_modules</code>, <code>WinSxS</code>, <code>site-packages</code> and browser caches only the folder itself is listed, which keeps the index small.</p>`;
 
   const mins = [[102400, "100 KB"], [1048576, "1 MB"], [10485760, "10 MB"], [104857600, "100 MB"]];
   $("#sp-clean").innerHTML =

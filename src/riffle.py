@@ -1510,7 +1510,7 @@ class Engine:
                     with self.lock:
                         self.ix = ix
                     self.state = 'enriching'
-                    self.message = f'{ix.n:,} names ready — filling in size and date'
+                    self.message = f'{ix.n:,} names found. Reading sizes and dates…'
 
             # Phase 2: the full walk, with sizes and dates.
             self.message = self.message if recs else 'Walking the filesystem'
@@ -1538,7 +1538,7 @@ class Engine:
 
     def _tick(self, n):
         self.progress = n
-        self.message = f'Walking the filesystem — {n:,} items'
+        self.message = f'Reading this PC: {n:,} items'
 
 
 ENGINE = Engine()
@@ -1680,7 +1680,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/', '/index.html'):
             f = os.path.join(RES, 'ui.html')
             if not os.path.exists(f):
-                return self._send(500, 'ui.html is missing — keep it next to riffle.py',
+                return self._send(500, 'ui.html is missing. Keep it next to riffle.py.',
                                   'text/plain; charset=utf-8')
             with open(f, 'rb') as fh:
                 return self._send(200, features.inject(fh.read()), 'text/html; charset=utf-8')

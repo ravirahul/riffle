@@ -577,7 +577,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
         <div id="spacer"><div id="rows"></div></div>
         <div class="empty" id="empty">
           <h2>Nothing to show yet</h2>
-          <p>Start typing to search. Then drag across the <span class="mk">Modified</span> or <span class="mk">Size</span> charts above to narrow by range.</p>
+          <p>Start typing to search. To narrow by date or size, drag across the <span class="mk">Modified</span> or <span class="mk">Size</span> graph in the sidebar.</p>
         </div>
       </div>
 
@@ -681,7 +681,7 @@ html[data-theme="dark"] .badge.ok{background:var(--mark-soft);border-color:var(-
         <li><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 012-2h11"/></svg><span><b>Duplicates</b> and <b>Clean up</b> show what's taking space, and only act when you say so.</span></li>
         <li><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg><span>Everything stays on this PC. Riffle never uploads your files.</span></li>
       </ul>
-      <label class="opt"><input type="checkbox" id="wAuto" checked> Start Riffle with Windows (it waits quietly in the background)</label>
+      <label class="opt"><input type="checkbox" id="wAuto" checked> Start Riffle with Windows (it runs in the background so the hotkey always works)</label>
       <div class="hint" style="margin:0 0 18px 25px">Indexing <span id="wDrives"></span></div>
       <div class="btns" style="display:flex;justify-content:flex-end"><button class="btn ink big" id="wGo">Start searching</button></div>
     </div>
@@ -1295,7 +1295,7 @@ async function poll(){
     pollTimer = setTimeout(poll, s.state !== "ready" ? 700 : active ? 1400 : 10000);
   }catch(err){
     $("#dot").className = "dot";
-    $("#stat").textContent = "Lost the local server — is riffle.py still running?";
+    $("#stat").textContent = "Riffle stopped answering. Open it again from the Start menu.";
     pollTimer = setTimeout(poll, 2000);
   }
 }

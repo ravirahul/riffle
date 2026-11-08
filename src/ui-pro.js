@@ -45,7 +45,7 @@ document.body.insertAdjacentHTML("beforeend", `
 </div>`);
 function showUpsell(feature){
   if (!LIC) return loadLicense().then(() => showUpsell(feature));
-  $("#upWhy").textContent = FEATURE_LINE[feature] || "Unlock everything Riffle can do.";
+  $("#upWhy").textContent = FEATURE_LINE[feature] || "Riffle Pro adds visual search, bulk clean-up and disk history.";
   $("#upList").innerHTML = LIC.features.map(f => `<li>${PRO_ICON}<span><b>${esc(f.title)}</b>${esc(f.desc)}</span></li>`).join("");
   const p = LIC.prices;
   $("#upPrice").innerHTML = `<b>₹${p.inrLaunch}</b> <s>₹${p.inr}</s> · <b>$${p.usdLaunch}</b> <s>$${p.usd}</s>
@@ -120,7 +120,7 @@ paintVisual = (orig => function(s){
     $("#visPick").hidden = $("#visPath").hidden = $("#visSuggest").hidden = true;
     $("#visFolders").innerHTML = "";
     $("#visStat").innerHTML = `Find the original of any photo or video, even after crops, filters or text, across your folders.
-      <br><button class="btn ink" id="visPro" style="margin-top:8px">${PRO_ICON} Unlock with Riffle Pro</button>`;
+      <br><button class="btn ink" id="visPro" style="margin-top:8px">${PRO_ICON} Get Riffle Pro</button>`;
     $("#visPro").onclick = () => showUpsell("visual");
     return;
   }
