@@ -106,6 +106,9 @@ def install_id():
 def install_source():
     """Where this install came from ("producthunt", "store"...), recorded by the installer
     from its download file name. "direct" when unknown or run from source."""
+    import features
+    if features.packaged():
+        return 'store'
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Bliink\Riffle') as k:
@@ -142,7 +145,7 @@ def status():
     now = time.time()
     left = max(0, TRIAL_DAYS - int((now - s.get('trialStart', now)) // 86400))
     out = {'tier': 'free', 'trialDaysLeft': left, 'buyUrl': BUY_URL, 'email': '', 'plan': '',
-           'activatedAt': s.get('activatedAt', 0)}
+           'activatedAt': s.get('activatedAt', 0), 'used': s.get('used', {})}
     p = parse_key(s.get('key', '')) if s.get('key') and s.get('instanceId') and not s.get('revoked') else None
     if p:
         out.update(tier='pro', email=s.get('email') or p.get('email', ''), plan=p.get('plan', 'lifetime'),
@@ -150,6 +153,15 @@ def status():
     elif left > 0:
         out['tier'] = 'trial'
     return out
+
+def bump(key, n=1):
+    """Count what Pro did ('freed' bytes, 'visual' searches) for the end-of-trial summary."""
+    if not n:
+        return
+    with _lock:
+        used = _state.setdefault('used', {})
+        used[key] = used.get(key, 0) + int(n)
+        _save()
 
 def is_pro():
     """Pro features unlocked: a licence, or the trial."""

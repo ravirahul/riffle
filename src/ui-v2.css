@@ -285,3 +285,6 @@ select option,select optgroup{background-color:var(--card);color:var(--ink)}
 .guide .gkeys{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:4px 0 0;font-size:13px;align-items:center}
 .guide .gkeys dt{white-space:nowrap}.guide .gkeys dd{margin:0;color:var(--ink-2)}
 .guide .gkeys dd{font-family:inherit}
+
+.wcard .wbtns{display:flex;gap:8px;flex-wrap:wrap}
+.wcard .wbtns .btn svg{vertical-align:-2px}

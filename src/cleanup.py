@@ -290,7 +290,7 @@ def recycle(paths):
     if not paths:
         return True
     op = SHFILEOPSTRUCTW(None, 3, '\0'.join(paths) + '\0\0', None,
-                         0x0040 | 0x0010 | 0x0004 | 0x0400)  # ALLOWUNDO|NOCONFIRMATION|SILENT|NOERRORUI
+                         0x0040 | 0x0010 | 0x0004 | 0x0400 | 0x4000)  # ALLOWUNDO|NOCONFIRMATION|SILENT|NOERRORUI|WANTNUKEWARNING
     return ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) == 0
 
 def _force_remove(func, path, exc):

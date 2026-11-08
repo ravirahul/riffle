@@ -6,7 +6,8 @@ const PRO_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" st
 const FEATURE_LINE = {
   visual:"Visual search is part of Riffle Pro.", "dupes-bulk":"Removing every extra copy at once is part of Riffle Pro.",
   "clean-all":"Cleaning this card is part of Riffle Pro. Temp files, caches and the Recycle Bin stay free.",
-  auto:"Automatic monthly clean-up is part of Riffle Pro.", history:"Disk growth history is part of Riffle Pro."
+  auto:"Automatic monthly clean-up is part of Riffle Pro.", history:"Disk growth history is part of Riffle Pro.",
+  worth:"Recycling a whole group at once is part of Riffle Pro. Show them stays free."
 };
 const isPro = () => LIC && (LIC.tier === "pro" || LIC.tier === "trial");
 
@@ -43,9 +44,10 @@ document.body.insertAdjacentHTML("beforeend", `
     <p class="hint up-free">Search, the quick bar, preview, Insights and every scan stay free, forever.</p>
   </div>
 </div>`);
-function showUpsell(feature){
-  if (!LIC) return loadLicense().then(() => showUpsell(feature));
-  $("#upWhy").textContent = FEATURE_LINE[feature] || "Riffle Pro adds visual search, bulk clean-up and disk history.";
+function showUpsell(feature, title, why){
+  if (!LIC) return loadLicense().then(() => showUpsell(feature, title, why));
+  $("#upT").innerHTML = title || 'Do more with <span class="mk">Riffle Pro</span>';
+  $("#upWhy").textContent = why || FEATURE_LINE[feature] || "Riffle Pro adds visual search, bulk clean-up and disk history.";
   $("#upList").innerHTML = LIC.features.map(f => `<li>${PRO_ICON}<span><b>${esc(f.title)}</b>${esc(f.desc)}</span></li>`).join("");
   const p = LIC.prices;
   $("#upPrice").innerHTML = `<b>₹${p.inrLaunch}</b> <s>₹${p.inr}</s> · <b>$${p.usdLaunch}</b> <s>$${p.usd}</s>
@@ -58,6 +60,25 @@ $("#upsell").addEventListener("click", e => { if (e.target.id === "upsell") clos
 $("#upsell").addEventListener("keydown", e => { if (e.key === "Escape"){ e.stopPropagation(); closeUpsell(); } });
 $("#upBuy").onclick = () => { api("/api/license/buy", {}); toast("Opening the Riffle Pro page in your browser"); };
 $("#upKey").onclick = () => { closeUpsell(); openSettings("pro"); setTimeout(() => $("#pKey") && $("#pKey").focus(), 150); };
+
+/* ── end of the trial: once a day in the last 2 days, once after it ends ── */
+function trialNote(){
+  const L = LIC; if (!L || L.tier === "pro") return;
+  const ending = L.tier === "trial" && L.trialDaysLeft <= 2, ended = L.tier === "free";
+  if (!ending && !ended) return;
+  const mark = ended ? "ended" : new Date().toDateString();
+  try{ if (localStorage.getItem("riffle.trialNote") === mark) return; localStorage.setItem("riffle.trialNote", mark); }catch(e){ return; }
+  const u = L.used || {}, did = [];
+  if (u.freed) did.push(`freed ${fmtSize(u.freed)}`);
+  if (u.visual) did.push(`found ${fmtN(u.visual)} picture${u.visual === 1 ? "" : "s"}`);
+  const title = ended ? 'Your <span class="mk">Pro trial</span> has ended'
+    : `Your <span class="mk">Pro trial</span> ends ${L.trialDaysLeft <= 1 ? "tomorrow" : `in ${L.trialDaysLeft} days`}`;
+  const why = (did.length ? `With Pro you ${did.join(" and ")}. ` : "") + (ended
+    ? "Search and the quick bar stay free. Get Pro to keep visual search and one-click clean-up."
+    : "Get Pro to keep visual search and one-click clean-up.");
+  showUpsell(null, title, why);
+}
+setTimeout(() => (LIC ? Promise.resolve(LIC) : loadLicense()).then(trialNote), 4000);
 
 /* ── trial / Pro chip in the footer ─────────────────────────── */
 $(".foot").insertAdjacentHTML("beforeend", `<button class="prochip" id="proChip" hidden></button>`);

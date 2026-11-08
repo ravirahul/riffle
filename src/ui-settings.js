@@ -208,7 +208,8 @@ function paintSettings(){
       + row("Voice search", "Speak instead of typing: press → in the quick bar. Works offline, nothing is recorded or sent.", voiceCtl()));
 
   $("#sp-general").innerHTML =
-    row("Start with Windows", SV.canAutostart ? "Riffle runs in the background so the hotkey always works."
+    row("Start with Windows", SV.packaged ? "On, so the hotkey always works. Turn it off in Task Manager › Startup apps."
+          : SV.canAutostart ? "Riffle runs in the background so the hotkey always works."
           : "Available in the installed app.", sw("sAuto", SV.autostart, !SV.canAutostart))
     + row("Theme", "", `<div class="seg2" id="sTheme">${["system", "light", "dark"].map(t =>
           `<button data-v="${t}" aria-pressed="${s.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`)

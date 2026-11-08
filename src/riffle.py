@@ -52,7 +52,7 @@ import features
 import picks
 import sources
 
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 GITHUB_REPO = os.environ.get('RIFFLE_REPO', 'ravirahul/riffle')  # update checks
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Frozen builds (PyInstaller) unpack bundled resources to sys._MEIPASS;
@@ -1719,6 +1719,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(503, json.dumps({'error': _visual['error'] or 'Visual search is starting'}))
             try:
                 results, qimg = v.search_bytes(data, self.headers.get('Content-Type', ''))
+                __import__('license').bump('visual')
             except Exception as e:
                 return self._send(422, json.dumps({'error': f"Couldn't read that file: {e}"}))
             q = None
@@ -1886,7 +1887,7 @@ def recycle(paths):
             FOF_SILENT = 0x4
             buf = '\x00'.join(os.path.normpath(p) for p in paths) + '\x00\x00'   # double-NUL list
             op = SHFILEOPSTRUCTW(None, FO_DELETE, buf, None,
-                                 FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT, False, None, None)
+                                 FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | 0x4000, False, None, None)   # 0x4000: warn before a permanent delete
             rc = shell32.SHFileOperationW(ctypes.byref(op))
             if rc != 0:
                 return {'ok': False, 'error': f'shell refused (code {rc})'}
@@ -2239,7 +2240,7 @@ def start_quickbar(url):
     def visual_rows(src):
         """Image mode in the bar: the original, other copies and look-alikes of a picture."""
         if not features.pro():
-            raise RuntimeError('Visual search is part of Riffle Pro. Enter opens Riffle, where you can try it free')
+            raise RuntimeError('Visual search is part of Riffle Pro. Enter opens Riffle to get it')
         if features.pack_needed():
             raise RuntimeError('Visual search is not installed yet. Enter opens Riffle to add it (a free download)')
         v = visual()
@@ -2252,6 +2253,7 @@ def start_quickbar(url):
         else:
             data, ctype = src
         res = [v.public(r) for r in v.search_bytes(data, ctype)[0]]
+        __import__('license').bump('visual')
         if not res and (v.status().get('index') or {}).get('running'):
             raise RuntimeError('Riffle is still reading your pictures. Try again in a moment')
         orig = [r for r in res if r['original']]
@@ -2521,7 +2523,8 @@ def main():
             # Files may have changed while Riffle was off. Let boot settle first.
             ENGINE.refresh(ENGINE.ix.roots or default_roots(), delay=0 if '--now' in sys.argv else 90)
 
-    if '--no-window' not in sys.argv:
+    # RiffleStart.exe is the Store package's sign-in launcher: same app, no window
+    if '--no-window' not in sys.argv and not os.path.basename(sys.executable).lower().startswith('rifflestart'):
         open_window(url)
     if os.environ.get('RIFFLE_PROFILE') and IS_WIN:
         threading.Thread(target=_profile_threads, daemon=True, name='profile').start()

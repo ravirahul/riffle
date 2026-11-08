@@ -651,12 +651,26 @@ if (typeof paintInsights === "function"){
         <div class="wmeta">${fmtN(x.files)} file${x.files === 1 ? "" : "s"}</div>
         <details><summary>Biggest ones</summary><ul>${x.items.map(it => `<li data-reveal="${esc(it.path)}" title="Show in folder: ${esc(it.path)}">
           <span>${esc(it.path.split("\\").pop())}</span><i>${fmtSize(it.size)}</i></li>`).join("")}</ul></details>
-        <button class="btn" data-wk="${i}">Show them</button></article>`).join("")}</div></section>`
+        <div class="wbtns"><button class="btn" data-wk="${i}">Show them</button>${WALL.includes(x.key)
+          ? `<button class="btn" data-wall="${i}">${typeof isPro === "function" && !isPro() ? PRO_ICON + " " : ""}Recycle all</button>` : ""}</div>
+        </article>`).join("")}</div></section>`
       : `<section class="worth"><div class="whead"><h2>Worth a look</h2><span>Nothing big to tidy up right now.</span></div></section>`;
     const tiles = document.querySelector("#insOut .tiles");
     if (tiles) tiles.insertAdjacentHTML("afterend", html);
   })(paintInsights);
-  $("#insOut").addEventListener("click", e => {
+  $("#insOut").addEventListener("click", async e => {
+    const w = e.target.closest("[data-wall]");
+    if (w){
+      e.stopPropagation();
+      const x = ins.data.findings[+w.dataset.wall];
+      if (typeof isPro === "function" && !isPro()) return showUpsell("worth");
+      if (!await ask(`Move ${fmtN(x.files)} file${x.files === 1 ? "" : "s"} (${fmtSize(x.bytes)}) to the Recycle Bin?`,
+                     "Recycle all", "You can restore them from the Recycle Bin.")) return;
+      const r = await api("/api/findings/recycle", { key:x.key }).catch(() => ({}));
+      if (r.removed){ toast(`Freed ${fmtSize(r.freed)}`); loadInsights(true); }
+      else if (r.error) toast(r.error);
+      return;
+    }
     const b = e.target.closest("[data-wk]"); if (!b) return;
     e.stopPropagation();
     const a = ins.data.findings[+b.dataset.wk].action || {};
@@ -666,6 +680,8 @@ if (typeof paintInsights === "function"){
     scheduleSearch(0); setTimeout(syncChips, 50);
   }, true);
 }
+
+const WALL = ["unzipped", "installers", "olddl"];   // never screenshots or videos
 
 /* ── 8. Settings › Guide: how everything works, in one place ─────────────── */
 const GUIDE_ICO = '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2zM4 5v16M8 7h7M8 11h5"/></svg>';

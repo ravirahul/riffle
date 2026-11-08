@@ -57,7 +57,15 @@ calls.clear(); h = post('/api/cleanup/remove', {'paths': ['Z:\\fake\\tmp1']})
 results['free: temp card -> allowed'] = h.code == 200 and calls == [('clean', ['Z:\\fake\\tmp1'])]
 calls.clear(); h = post('/api/autoclean', {'on': True})
 results['free: auto clean-up -> 402'] = h.code == 402
+f0 = os.path.join(d, 'old.zip'); open(f0, 'wb').write(b'x' * 10)
+features._finding_paths.update(unzipped=[f0], shots=[f0])
+calls.clear(); h = post('/api/findings/recycle', {'key': 'unzipped'})
+results['free: Worth a look recycle all -> 402, nothing removed'] = h.code == 402 and not calls
 tier('trial')
+calls.clear(); h = post('/api/findings/recycle', {'key': 'shots'})
+results['trial: screenshots never bulk-recycled'] = not calls
+calls.clear(); h = post('/api/findings/recycle', {'key': 'unzipped'})
+results['trial: Worth a look recycle all -> allowed, counted'] = calls == [('recycle', [f0])] and license.status()['used'].get('freed') == 100
 calls.clear(); h = post('/api/dupes/remove', {'paths': ['Z:\\fake\\a2', 'Z:\\fake\\b2']})
 results['trial: bulk across sets -> allowed'] = h.code == 200 and len(calls) == 1 and len(calls[0][1]) == 2
 calls.clear(); h = post('/api/cleanup/remove', {'paths': ['Z:\\fake\\old.exe']})

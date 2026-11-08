@@ -156,7 +156,7 @@ def settings_view():
                   'state': eng.state, 'message': eng.message,
                   'savedAt': getattr(eng, 'saved_at', 0),
                   'bytes': os.path.getsize(cache) if os.path.exists(cache) else 0},
-        'autostart': auto, 'canAutostart': bool(getattr(sys, 'frozen', False)),
+        'autostart': auto, 'canAutostart': bool(getattr(sys, 'frozen', False)) and not packaged(), 'packaged': packaged(),
         'version': _ctx.get('version'), 'dataDir': _ctx['data_dir'],
         'visualPack': 'installed' if not pack_needed() else _pack['state'],
         'voicePack': 'installed' if voice_models() else dict(_packs['voice']),
@@ -362,12 +362,28 @@ def _launch_cmd():
     pyw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
     return f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(os.path.join(_ctx["res"], "riffle.py"))}" --no-window'
 
+_PKG = None
+def packaged():
+    """True when this copy came from the Microsoft Store (an MSIX package). The Store then
+    handles updates, and Windows starts Riffle at sign-in through the package's startup task."""
+    global _PKG
+    if _PKG is None:
+        try:
+            import ctypes
+            n = ctypes.c_uint32(0)
+            _PKG = ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(n), None) != 15700
+        except Exception:
+            _PKG = False
+    return _PKG
+
 def autostart(on=None):
     """Read, or (installed builds only) set, the start-with-Windows entry.
     A copy run from source never writes it, so testing can't redirect the
     real app's startup entry to a dev folder."""
     import sys
     import winreg
+    if packaged():
+        return True                     # the package's startup task; switched off in Task Manager
     if not getattr(sys, 'frozen', False):
         on = None
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
@@ -447,6 +463,9 @@ def post(h, path, body):
             for g in _dupes.state['groups']:
                 g['files'] = [f for f in g['files'] if f['path'].lower() not in gone]
             _dupes.state['groups'] = [g for g in _dupes.state['groups'] if len(g['files']) > 1]
+        if done:
+            import license
+            license.bump('freed', freed)
         return _json(h, {'freed': freed if done else 0, 'removed': len(ok) if done else 0,
                          'refused': len(body.get('paths', [])) - len(ok)})
     if path == '/api/cleanup/scan':
@@ -461,7 +480,25 @@ def post(h, path, body):
             card_of = getattr(_cleaner, 'card_of', {})
             if any(card_of.get(os.path.normcase(p)) not in FREE_CARDS for p in body.get('paths', [])):
                 return _json(h, {'error': 'pro', 'feature': 'clean-all'}, 402)
-        return _json(h, _cleaner.remove(body.get('paths', [])))
+        r = _cleaner.remove(body.get('paths', []))
+        import license
+        license.bump('freed', r.get('freed', 0))
+        return _json(h, r)
+    if path == '/api/findings/recycle':
+        # Insights' "Worth a look": send a whole finding to the Recycle Bin (Pro)
+        if not pro():
+            return _json(h, {'error': 'pro', 'feature': 'worth'}, 402)
+        key = body.get('key', '')
+        paths = [p for p in _finding_paths.get(key, []) if os.path.isfile(p)] if key in BULK_FINDINGS else []
+        if not paths:
+            return _json(h, {'error': 'Open Insights again, then retry.'})
+        import cleanup, license
+        freed = sum(os.path.getsize(p) for p in paths)
+        if not cleanup.recycle(paths):
+            return _json(h, {'error': 'Windows could not move them to the Recycle Bin.'})
+        license.bump('freed', freed)
+        _finding_paths.pop(key, None)
+        return _json(h, {'freed': freed, 'removed': len(paths)})
     if path == '/api/license/activate':
         import license
         return _json(h, license.activate(str(body.get('key', ''))))
@@ -673,6 +710,8 @@ def _findings(eng, ix, ids, size, mtime, extv, par, dirs, ndirs, exts, cat_slot,
         if b < 50 << 20:                            # under 50 MB is not worth anyone's time
             return
         top = k[np.argsort(-size[k])[:6]]
+        if key in BULK_FINDINGS:
+            _finding_paths[key] = [dirs[int(par[j])].rstrip('\\') + '\\' + ix.name(int(ids[j])) for j in k.tolist()]
         out.append({'key': key, 'title': title, 'why': why, 'bytes': b, 'files': int(k.size), 'action': action,
                     'items': [{'path': dirs[int(par[j])].rstrip('\\') + '\\' + ix.name(int(ids[j])),
                                'size': int(size[j]), 'mtime': int(mtime[j])} for j in top.tolist()]})
@@ -846,19 +885,32 @@ def pack_install(name='visual'):
         os.makedirs(base, exist_ok=True)
         zpath = os.path.join(base, PACKS[name] + '.part')
         try:
-            url, size, sum_url = _pack_assets(name)
-            with urllib.request.urlopen(urllib.request.Request(sum_url, headers={'User-Agent': 'Riffle'}), timeout=15) as r:
-                want = r.read().decode().split()[0].lower()
-            st['total'] = size
-            h = hashlib.sha256()
-            with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Riffle'}), timeout=30) as r, \
-                    open(zpath, 'wb') as f:
-                while chunk := r.read(1 << 20):
-                    f.write(chunk)
-                    h.update(chunk)
-                    st['got'] += len(chunk)
-            if h.hexdigest() != want:
-                raise RuntimeError('download was corrupted (checksum mismatch), please try again')
+            # GitHub first, then the copy on riffle.bliink.in, so one site being down doesn't stop anyone
+            import license
+            mirror = f'{license.SERVER}/files/{PACKS[name]}'
+            try:
+                srcs = [_pack_assets(name), (mirror, 0, mirror + '.sha256')]
+            except Exception:
+                srcs = [(mirror, 0, mirror + '.sha256')]
+            for i, (url, size, sum_url) in enumerate(srcs):
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(sum_url, headers={'User-Agent': 'Riffle'}), timeout=15) as r:
+                        want = r.read().decode().split()[0].lower()
+                    st.update(got=0, total=size)
+                    h = hashlib.sha256()
+                    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Riffle'}), timeout=30) as r, \
+                            open(zpath, 'wb') as f:
+                        st['total'] = st['total'] or int(r.headers.get('Content-Length') or 0)
+                        while chunk := r.read(1 << 20):
+                            f.write(chunk)
+                            h.update(chunk)
+                            st['got'] += len(chunk)
+                    if h.hexdigest() != want:
+                        raise RuntimeError('download was corrupted (checksum mismatch), please try again')
+                    break
+                except Exception:
+                    if i == len(srcs) - 1:
+                        raise
             st['state'] = 'unpacking'
             tmp = pack_dir(name) + '.new'
             shutil.rmtree(tmp, ignore_errors=True)
@@ -902,6 +954,8 @@ def voice_models():
 # Pro (or the 14-day trial): visual search, bulk duplicate removal, every clean-up
 # card, monthly automatic clean-up, disk growth history in Insights.
 FREE_CARDS = {'temp', 'caches', 'bin'}
+BULK_FINDINGS = {'unzipped', 'installers', 'olddl'}   # never screenshots or videos: those are people's own
+_finding_paths = {}                                    # finding key -> every path, from the last Insights run
 PRO_FEATURES = [
     ('visual', 'Visual search', 'Find the original of any photo or video, even after crops and filters.'),
     ('dupes', 'One-click duplicate removal', 'Recycle every extra copy at once, across all sets.'),
@@ -1034,6 +1088,6 @@ def check_update(force=False):
           except Exception:
             pass
     latest = _update['latest']
-    newer = bool(latest) and _vtuple(latest) > _vtuple(_ctx.get('version', '0'))
+    newer = bool(latest) and _vtuple(latest) > _vtuple(_ctx.get('version', '0')) and not packaged()
     return {'current': _ctx.get('version'), 'latest': latest, 'available': newer,
             'url': _update['url'] if newer else None, 'notes': _update['notes'] if newer else ''}
