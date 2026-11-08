@@ -50,15 +50,28 @@ function showUpsell(feature, title, why){
   $("#upWhy").textContent = why || FEATURE_LINE[feature] || "Riffle Pro adds visual search, bulk clean-up and disk history.";
   $("#upList").innerHTML = LIC.features.map(f => `<li>${PRO_ICON}<span><b>${esc(f.title)}</b>${esc(f.desc)}</span></li>`).join("");
   const p = LIC.prices;
-  $("#upPrice").innerHTML = `<b>₹${p.inrLaunch}</b> <s>₹${p.inr}</s> · <b>$${p.usdLaunch}</b> <s>$${p.usd}</s>
-    <span>one-time, for 3 PCs · launch price</span>`;
+  $("#upPrice").innerHTML = `<b>₹${p.inr}</b> <span>one-time, for 3 PCs</span>`;
   $("#upsell").classList.add("on");
   $("#upBuy").focus();
 }
 const closeUpsell = () => $("#upsell").classList.remove("on");
 $("#upsell").addEventListener("click", e => { if (e.target.id === "upsell") closeUpsell(); });
 $("#upsell").addEventListener("keydown", e => { if (e.key === "Escape"){ e.stopPropagation(); closeUpsell(); } });
-$("#upBuy").onclick = () => { api("/api/license/buy", {}); toast("Opening the Riffle Pro page in your browser"); };
+$("#upBuy").onclick = () => { closeUpsell(); startBuy(); };
+
+/* buying: the checkout opens in the browser; Riffle unlocks by itself once the payment clears */
+let buyWatch = 0;
+function startBuy(){
+  api("/api/license/buy", {});
+  toast("Finish paying in your browser. Riffle unlocks by itself.");
+  clearInterval(buyWatch);
+  const until = Date.now() + 30 * 60e3;
+  buyWatch = setInterval(async () => {
+    const L = await api("/api/license").catch(() => null);
+    if (L && L.tier === "pro"){ clearInterval(buyWatch); await loadLicense(); toast("Riffle Pro is on. Thank you!"); }
+    else if (Date.now() > until) clearInterval(buyWatch);
+  }, 5000);
+}
 $("#upKey").onclick = () => { closeUpsell(); openSettings("pro"); setTimeout(() => $("#pKey") && $("#pKey").focus(), 150); };
 
 /* ── end of the trial: once a day in the last 2 days, once after it ends ── */
@@ -107,18 +120,18 @@ function paintPro(){
     + (L.tier === "pro"
       ? row("This PC", "Move Pro to another PC by deactivating it here first. Each key works on 3 PCs.",
             `<button class="btn" id="pDeact">Deactivate</button>`)
-      : `<div class="pro-buy"><div><div class="up-price"><b>₹${p.inrLaunch}</b> <s>₹${p.inr}</s> · <b>$${p.usdLaunch}</b> <s>$${p.usd}</s></div>
-           <span class="hint">One payment, yours for life, on up to 3 PCs. UPI in India, PayPal everywhere else.</span></div>
+      : `<div class="pro-buy"><div><div class="up-price"><b>₹${p.inr}</b></div>
+           <span class="hint">One payment, yours for life, on up to 3 PCs. UPI, cards or netbanking.</span></div>
            <button class="btn ink big" id="pBuy">Get Riffle Pro</button></div>
          <div class="sgroup">Already bought it?</div>
-         <div class="pro-key"><textarea id="pKey" rows="3" spellcheck="false" placeholder="Paste your licence key: RIFFLE1.…" aria-label="Licence key"></textarea>
+         <div class="pro-key"><textarea id="pKey" rows="3" spellcheck="false" placeholder="Paste your licence key" aria-label="Licence key"></textarea>
            <button class="btn ink" id="pAct">Activate</button></div>
          <p class="hint" id="pMsg" role="status"></p>`)
     + `<p class="hint" style="margin-top:14px">Activating sends only the key and this PC's name to riffle.bliink.in, once. Riffle never sends anything about your files.</p>`;
 }
 $("#set").addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
-  if (b.id === "pBuy"){ api("/api/license/buy", {}); toast("Opening the Riffle Pro page in your browser"); }
+  if (b.id === "pBuy") startBuy();
   if (b.id === "pAct"){
     const key = $("#pKey").value.trim();
     if (!key) return $("#pKey").focus();

@@ -1,6 +1,10 @@
 """Riffle Pro: licence keys, activation and the 14-day trial.
 
-Keys are issued by riffle.bliink.in and look like
+New keys come from Bliink Billing (billing.bliink.in): BLK1.<payload>.<sig>, same scheme with
+the billing key, product "riffle". Buying: Riffle makes a random claim code, opens the checkout
+with it, and collects the key with that code once the payment clears.
+
+Older keys were issued by riffle.bliink.in and look like
     RIFFLE1.<b64url(payload json)>.<b64url(r||s)>
 signed with ECDSA P-256 / SHA-256 over "RIFFLE1.<payload b64url>". They are verified
 here with Windows CNG (bcrypt.dll), so no crypto library is bundled.
@@ -21,8 +25,11 @@ import time
 import urllib.request
 from ctypes import wintypes as W
 
-SERVER = os.environ.get('RIFFLE_LICENSE_SERVER', 'https://riffle.bliink.in')
-BUY_URL = SERVER + '/buy'
+SERVER = os.environ.get('RIFFLE_LICENSE_SERVER', 'https://riffle.bliink.in')     # old keys, updates
+BILLING = os.environ.get('RIFFLE_BILLING', 'https://billing.bliink.in')          # buying, new keys
+BUY_URL = BILLING + '/riffle'
+# billing.bliink.in/api/pubkey as an uncompressed point, hex. Tests may override with RIFFLE_BLK_PUBKEY.
+BLK_PUBLIC_KEY_HEX = '043cfdec79d737fb0e244bb430cee9783a9de9b631d58ec45a48f285cd109b56707f7867db8eba9866d83ffd70cd75557a724b7d85663e69a77b7bec84b1ee6a21'
 TRIAL_DAYS = 14
 RECHECK_DAYS = 14
 PREFIX = 'RIFFLE1'
@@ -63,17 +70,22 @@ def parse_key(key):
     """Payload dict for a genuine Riffle key, else None. Offline, constant time per key."""
     key = ''.join((key or '').split())
     parts = key.split('.')
-    if len(parts) != 3 or parts[0] != PREFIX:
+    if len(parts) != 3 or parts[0] not in (PREFIX, 'BLK1'):
         return None
-    pub = os.environ.get('RIFFLE_PUBKEY') or PUBLIC_KEY_HEX
+    pub = (os.environ.get('RIFFLE_PUBKEY') or PUBLIC_KEY_HEX) if parts[0] == PREFIX \
+        else (os.environ.get('RIFFLE_BLK_PUBKEY') or BLK_PUBLIC_KEY_HEX)
     try:
         sig = _b64u(parts[2])
-        if not pub or not _cng_verify(pub, f'{PREFIX}.{parts[1]}'.encode(), sig):
+        if not pub or not _cng_verify(pub, f'{parts[0]}.{parts[1]}'.encode(), sig):
             return None
         p = json.loads(_b64u(parts[1]))
     except (ValueError, OSError):
         return None
-    return p if isinstance(p, dict) and p.get('v') == 1 and isinstance(p.get('lid'), str) else None
+    if not (isinstance(p, dict) and p.get('v') == 1 and isinstance(p.get('lid'), str)):
+        return None
+    if parts[0] == 'BLK1' and (p.get('product') != 'riffle' or (p.get('exp') and p['exp'] < time.time())):
+        return None                  # another app's key, or a refunded / ended purchase
+    return p
 
 # ---- local state -------------------------------------------------------------------
 def init(data_dir):
@@ -168,8 +180,10 @@ def is_pro():
     return status()['tier'] in ('pro', 'trial')
 
 # ---- server calls ------------------------------------------------------------------
-def _post(path, body, timeout=15):
-    req = urllib.request.Request(SERVER + path, json.dumps(body).encode(),
+def _post(path, body, timeout=15, key=''):
+    """POST to the server that issued `key`: Bliink Billing for BLK1 keys, riffle.bliink.in otherwise."""
+    url = f'{BILLING}/api/{path}' if key.startswith('BLK1.') else f'{SERVER}/api/{path}.php'
+    req = urllib.request.Request(url, json.dumps(body).encode(),
                                  {'Content-Type': 'application/json', 'User-Agent': 'Riffle'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
@@ -186,14 +200,15 @@ def activate(key):
     if not p:
         return {'ok': False, 'error': ERRORS['invalid']}
     try:
-        r = _post('/api/activate.php', {'key': key, 'instance': _pc_id(), 'label': socket.gethostname()[:60],
-                                        'iid': install_id(), 'src': install_source()})   # ties the sale to its source
+        r = _post('activate', {'key': key, 'instance': _pc_id(), 'label': socket.gethostname()[:60],
+                               'iid': install_id(), 'src': install_source()}, key=key)   # ties the sale to its source
     except OSError:
-        return {'ok': False, 'error': "Couldn't reach riffle.bliink.in. Check the internet connection and try again."}
+        return {'ok': False, 'error': "Couldn't reach the licence server. Check the internet connection and try again."}
     if not r.get('ok'):
         return {'ok': False, 'error': ERRORS.get(r.get('error'), 'Activation failed. Please try again.')}
     with _lock:
-        _state.update(key=key, instanceId=r['instanceId'], email=(r.get('license') or {}).get('email', ''),
+        key = r.get('key') if parse_key(r.get('key', '')) else key        # billing hands back a fresh key
+        _state.update(key=key, instanceId=r['instanceId'], email=(r.get('license') or {}).get('email', '') or p.get('email', ''),
                       activatedAt=int(time.time()), lastCheck=int(time.time()), revoked=False)
         _save()
     return {'ok': True, **status()}
@@ -203,7 +218,7 @@ def deactivate():
         key, inst = _state.get('key'), _state.get('instanceId')
     if key and inst:
         try:
-            _post('/api/deactivate.php', {'key': key, 'instanceId': inst})
+            _post('deactivate', {'key': key, 'instanceId': inst}, key=key)
         except OSError:
             pass                     # frees the seat when it can; locally it's gone either way
     with _lock:
@@ -214,21 +229,73 @@ def deactivate():
 
 def recheck_if_due():
     """Every RECHECK_DAYS, ask the server whether the key is still good. Offline is fine."""
+    collect()                        # a purchase finished after Riffle was closed
     with _lock:
         key, inst, last = _state.get('key'), _state.get('instanceId'), _state.get('lastCheck', 0)
     if not key or not inst or time.time() - last < RECHECK_DAYS * 86400:
         return
     try:
-        r = _post('/api/validate.php', {'key': key, 'instanceId': inst})
+        r = _post('validate', {'key': key, 'instanceId': inst}, key=key)
     except OSError:
         return
     with _lock:
         _state['lastCheck'] = int(time.time())
-        if r.get('status') == 'revoked':
+        if r.get('status') in ('revoked', 'expired'):          # expired = refunded on Bliink Billing
             _state['revoked'] = True
+        elif parse_key(r.get('key', '')):
+            _state['key'] = r['key']
         elif r.get('status') == 'unknown_instance':
             # seat freed from another PC: try to take one again quietly next time
             _state.pop('instanceId', None)
         _save()
     if r.get('status') == 'unknown_instance':
         activate(key)
+
+
+# ---- buying through Bliink Billing ------------------------------------------------
+def buy():
+    """Open the checkout with a fresh claim code and wait for the key in the background.
+    The code is kept for 7 days, so a payment finished after a restart still unlocks."""
+    code = secrets.token_urlsafe(24)
+    with _lock:
+        _state['claim'], _state['claimAt'] = code, int(time.time())
+        _save()
+    import webbrowser
+    webbrowser.open(f'{BUY_URL}?claim={code}')
+    threading.Thread(target=_wait_for_key, args=(30 * 60,), daemon=True, name='licence-claim').start()
+
+def collect():
+    """One look for a bought key. True once Pro is on."""
+    with _lock:
+        code, at = _state.get('claim'), _state.get('claimAt', 0)
+    if not code:
+        return False
+    if time.time() - at > 7 * 86400:
+        with _lock:
+            _state.pop('claim', None)
+            _save()
+        return False
+    try:
+        req = urllib.request.Request(f'{BILLING}/api/claim?code={code}', headers={'User-Agent': 'Riffle'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            j = json.load(r)
+    except (OSError, ValueError):
+        return False
+    if j.get('status') != 'ready' or not parse_key(j.get('key', '')):
+        return False
+    with _lock:
+        _state.pop('claim', None)
+        _save()
+    res = activate(j['key'])
+    if not res.get('ok'):             # keep the key so "I have a key" can be tried later
+        with _lock:
+            _state['pendingKey'] = j['key']
+            _save()
+    return res.get('ok', False)
+
+def _wait_for_key(seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        if collect():
+            return
+        time.sleep(5)

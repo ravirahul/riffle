@@ -506,8 +506,8 @@ def post(h, path, body):
         import license
         return _json(h, license.deactivate())
     if path == '/api/license/buy':
-        import license, webbrowser
-        webbrowser.open(license.BUY_URL)
+        import license
+        license.buy()
         return _json(h, {'ok': True})
     if path == '/api/autostart':
         return _json(h, {'on': autostart(bool(body.get('on')))})
@@ -968,11 +968,30 @@ def pro():
     import license
     return license.is_pro()
 
+_PRICE = {'inr': 499, 'at': 0}
+def _price():
+    """Riffle Pro's price in rupees from Bliink Billing, asked at most once a day (the first call
+    answers with the last known price and refreshes in the background)."""
+    if time.time() - _PRICE['at'] > 86400:
+        _PRICE['at'] = time.time()
+        def fetch():
+            import license
+            try:
+                req = urllib.request.Request(f'{license.BILLING}/api/plans?product=riffle', headers={'User-Agent': 'Riffle'})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    plans = json.load(r).get('plans') or []
+                amt = next(p['amount'] for p in plans if p.get('plan') == 'lifetime')
+                _PRICE['inr'] = round(amt / 100)
+            except Exception:
+                pass
+        threading.Thread(target=fetch, daemon=True, name='price').start()
+    return _PRICE['inr']
+
 def license_view():
     import license
     s = license.status()
     return {**s, 'features': [{'key': k, 'title': t, 'desc': d} for k, t, d in PRO_FEATURES],
-            'prices': {'inr': 699, 'inrLaunch': 499, 'usd': 19, 'usdLaunch': 12},
+            'prices': {'inr': _price()},
             'autoClean': _auto_state()}
 
 # -- daily upkeep: licence recheck, Insights history snapshot, automatic clean-up ---
